@@ -177,6 +177,7 @@ Beyond porting to Claude Code + Python, Stokowski ships several improvements ove
 - **Persistent command bar** — a live footer pinned at the bottom of the terminal showing agent count, token usage, and keyboard shortcuts; stays visible as logs scroll above it
 - **Single-key controls** — `q` graceful shutdown · `s` status table · `r` force poll · `h` help. No Ctrl+C wrestling.
 - **Graceful shutdown** — `q` kills all Claude Code subprocesses by process group before exiting, so you don't bleed tokens on orphaned agents
+- **Update check** — on launch, compares your local clone against `origin/main` and shows an update indicator in the footer when new commits are available
 
 </details>
 

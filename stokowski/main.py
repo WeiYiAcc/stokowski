@@ -41,6 +41,9 @@ from .orchestrator import Orchestrator
 
 console = Console()
 
+# Module-level update message, set once at startup
+_update_message: str | None = None
+
 
 def setup_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
@@ -49,6 +52,49 @@ def setup_logging(verbose: bool = False):
         format="%(message)s",
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
+
+
+# ── Update check ───────────────────────────────────────────────────────────
+
+async def check_for_updates():
+    """Check if the local Stokowski repo is behind origin/main."""
+    global _update_message
+    logger = logging.getLogger("stokowski")
+    repo_dir = Path(__file__).resolve().parent.parent
+
+    async def _git(*args: str) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(repo_dir), *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return proc.returncode, stdout.decode().strip()
+
+    # Check if it's a git repo
+    rc, _ = await _git("rev-parse", "--git-dir")
+    if rc != 0:
+        logger.info("Stokowski not installed from git clone — update checks disabled")
+        return
+
+    # Fetch latest from remote (quiet, fast)
+    rc, _ = await _git("fetch", "--quiet")
+    if rc != 0:
+        return
+
+    # Count commits behind origin/main
+    rc, count_str = await _git("rev-list", "--count", "HEAD..origin/main")
+    if rc != 0 or not count_str:
+        return
+
+    try:
+        behind = int(count_str)
+    except ValueError:
+        return
+
+    if behind > 0:
+        _update_message = f"{behind} commit{'s' if behind != 1 else ''} behind origin/main"
+        logger.info(f"Update available: {_update_message}")
 
 
 # ── Keyboard handler ────────────────────────────────────────────────────────
@@ -177,12 +223,14 @@ def _make_footer(orch: Orchestrator) -> Text:
         status = "[dim]● idle[/dim]"
         meta = ""
 
+    update = f"  [dim yellow]⬆ {_update_message}[/dim yellow]" if _update_message else ""
+
     return Text.from_markup(
         f"  [bold yellow]q[/bold yellow] quit  "
         f"[bold yellow]s[/bold yellow] status  "
         f"[bold yellow]r[/bold yellow] refresh  "
         f"[bold yellow]h[/bold yellow] help"
-        f"     {status}{meta}"
+        f"     {status}{meta}{update}"
     )
 
 
@@ -214,6 +262,8 @@ async def run_orchestrator(workflow_path: str, port: int | None = None):
             console.print(
                 "[yellow]Install web extras for dashboard: pip install stokowski[web][/yellow]"
             )
+
+    await check_for_updates()
 
     console.print(Panel(
         f"[bold]Stokowski[/bold]  [dim]Claude Code Orchestrator[/dim]\n"
