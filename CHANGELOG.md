@@ -4,9 +4,13 @@ All notable changes to Stokowski are documented here.
 
 ---
 
+## [Unreleased]
+
+---
+
 ## [0.1.0] - 2026-03-08
 
-### Initial release
+### Added
 
 - Async orchestration loop polling Linear for issues in configurable states
 - Per-issue isolated git workspace lifecycle with `after_create`, `before_run`, `after_run`, `before_remove` hooks
@@ -23,3 +27,8 @@ All notable changes to Stokowski are documented here.
 - Startup update check with footer indicator
 - `last_run_at` template variable injected into agent prompts for rework timestamp filtering
 - Append-only Linear comment strategy (planning + completion comment per run)
+
+---
+
+[Unreleased]: https://github.com/Sugar-Coffee/stokowski/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Sugar-Coffee/stokowski/releases/tag/v0.1.0
