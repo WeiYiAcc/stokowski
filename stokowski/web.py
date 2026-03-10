@@ -541,14 +541,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       return;
     }
 
-    const rows = all.map(r => `
+    const rows = all.map(r => {
+      const stageInfo = r.stage ? `<span style="color:var(--muted);font-size:11px;margin-left:8px">${esc(r.stage)}</span>` : '';
+      const runnerInfo = r.runner_type && r.runner_type !== 'claude' ? `<span style="color:var(--blue);font-size:10px;margin-left:6px;text-transform:uppercase">${esc(r.runner_type)}</span>` : '';
+      return `
       <div class="agent-card">
         <div>
-          <div class="agent-id">${esc(r.issue_identifier)}</div>
+          <div class="agent-id">${esc(r.issue_identifier)}${runnerInfo}</div>
         </div>
         <div>
           <div class="agent-status-row">
-            ${statusPill(r.status)}
+            ${statusPill(r.status)}${stageInfo}
           </div>
           <div class="agent-msg">${esc(r.last_message || '—')}</div>
         </div>
@@ -556,7 +559,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="agent-tokens">${fmt(r.tokens?.total_tokens || 0)} tok</div>
           <div class="agent-turns">turn ${r.turn_count || 0}</div>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     document.getElementById('agents-container').innerHTML =
       `<div class="agents">${rows}</div>`;
