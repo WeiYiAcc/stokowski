@@ -85,6 +85,7 @@ async def run_codex_turn(
     attempt: RunAttempt,
     on_pid: PidCallback | None = None,
     turn_timeout_ms: int = 3_600_000,
+    stall_timeout_ms: int = 300_000,
 ) -> RunAttempt:
     """Run a single Codex turn. Returns updated RunAttempt.
 
@@ -131,31 +132,86 @@ async def run_codex_turn(
         logger.error(attempt.error)
         return attempt
 
+    loop = asyncio.get_running_loop()
+    last_activity = loop.time()
+    stall_timeout_s = stall_timeout_ms / 1000
+    turn_timeout_s = turn_timeout_ms / 1000
+
+    async def read_stream():
+        nonlocal last_activity
+        output_lines = []
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            last_activity = loop.time()
+            attempt.last_event_at = datetime.now(timezone.utc)
+            line_str = line.decode().strip()
+            if line_str:
+                output_lines.append(line_str)
+                attempt.last_message = line_str[:200]
+        return output_lines
+
+    async def stall_monitor():
+        while proc.returncode is None:
+            await asyncio.sleep(min(stall_timeout_s / 4, 30))
+            elapsed = loop.time() - last_activity
+            if stall_timeout_s > 0 and elapsed > stall_timeout_s:
+                logger.warning(
+                    f"Codex stall detected issue={issue.identifier} "
+                    f"elapsed={elapsed:.0f}s"
+                )
+                proc.kill()
+                attempt.status = "stalled"
+                attempt.error = f"No output for {elapsed:.0f}s"
+                return
+
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=turn_timeout_ms / 1000,
+        reader = asyncio.create_task(read_stream())
+        monitor = asyncio.create_task(stall_monitor())
+
+        done, pending = await asyncio.wait(
+            {reader, monitor},
+            timeout=turn_timeout_s,
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        stdout_text = stdout_bytes.decode()[:2000] if stdout_bytes else ""
-        stderr_text = stderr_bytes.decode()[:500] if stderr_bytes else ""
 
-        if stdout_text:
-            attempt.last_message = stdout_text[:200]
+        if not done:
+            logger.warning(f"Codex turn timeout issue={issue.identifier}")
+            proc.kill()
+            attempt.status = "timed_out"
+            attempt.error = f"Turn exceeded {turn_timeout_s}s"
+        else:
+            await asyncio.wait_for(proc.wait(), timeout=30)
 
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    except Exception as e:
+        logger.error(f"Codex runner error issue={issue.identifier}: {e}")
+        proc.kill()
+        attempt.status = "failed"
+        attempt.error = str(e)
+        # Still need to run after_run hook and unregister PID below
+
+    # Determine final status from exit code if not already set
+    if attempt.status == "streaming":
+        stderr_output = ""
+        if proc.stderr:
+            try:
+                stderr_bytes = await asyncio.wait_for(proc.stderr.read(), timeout=5)
+                stderr_output = stderr_bytes.decode()[:500]
+            except (asyncio.TimeoutError, Exception):
+                pass
         if proc.returncode == 0:
             attempt.status = "succeeded"
         else:
             attempt.status = "failed"
-            attempt.error = f"Codex exit code {proc.returncode}: {stderr_text}"
-
-    except asyncio.TimeoutError:
-        proc.kill()
-        attempt.status = "timed_out"
-        attempt.error = "Codex turn timed out"
-    except Exception as e:
-        proc.kill()
-        attempt.status = "failed"
-        attempt.error = str(e)
+            attempt.error = f"Codex exit code {proc.returncode}: {stderr_output}"
 
     # Run after_run hook
     if hooks_cfg.after_run:
@@ -413,6 +469,7 @@ async def run_turn(
             attempt=attempt,
             on_pid=on_pid,
             turn_timeout_ms=claude_cfg.turn_timeout_ms,
+            stall_timeout_ms=claude_cfg.stall_timeout_ms,
         )
     elif runner_type == "claude":
         return await run_agent_turn(
