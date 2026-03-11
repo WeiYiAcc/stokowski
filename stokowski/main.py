@@ -298,8 +298,8 @@ def cli():
     parser.add_argument(
         "workflow",
         nargs="?",
-        default="./WORKFLOW.md",
-        help="Path to WORKFLOW.md (default: ./WORKFLOW.md)",
+        default=None,
+        help="Path to workflow.yaml or WORKFLOW.md (auto-detected if not specified)",
     )
     parser.add_argument(
         "--port", type=int, default=None,
@@ -315,6 +315,21 @@ def cli():
     )
 
     args = parser.parse_args()
+
+    if args.workflow is None:
+        if Path("workflow.yaml").exists():
+            args.workflow = "./workflow.yaml"
+        elif Path("workflow.yml").exists():
+            args.workflow = "./workflow.yml"
+        elif Path("WORKFLOW.md").exists():
+            args.workflow = "./WORKFLOW.md"
+        else:
+            console.print(
+                "[red]No workflow file found. Create workflow.yaml or WORKFLOW.md, "
+                "or specify a path: stokowski <path>[/red]"
+            )
+            sys.exit(1)
+
     _load_dotenv()
     setup_logging(args.verbose)
 
@@ -370,27 +385,38 @@ async def dry_run(workflow_path: str):
             console.print(f"[red]Config error: {e}[/red]")
         sys.exit(1)
 
+    cfg = workflow.config
     console.print("[green]Config valid[/green]")
-    console.print(f"  Tracker: {workflow.config.tracker.kind}")
-    console.print(f"  Project: {workflow.config.tracker.project_slug}")
-    console.print(f"  Active states: {workflow.config.tracker.active_states}")
-    console.print(f"  Max agents: {workflow.config.agent.max_concurrent_agents}")
-    console.print(f"  Claude model: {workflow.config.claude.model or 'default'}")
-    console.print(f"  Permission mode: {workflow.config.claude.permission_mode}")
-    console.print(f"  Workspace root: {workflow.config.workspace.resolved_root()}")
+    console.print(f"  Tracker: {cfg.tracker.kind}")
+    console.print(f"  Project: {cfg.tracker.project_slug}")
+    console.print(f"  Max agents: {cfg.agent.max_concurrent_agents}")
+    console.print(f"  Claude model: {cfg.claude.model or 'default'}")
+    console.print(f"  Permission mode: {cfg.claude.permission_mode}")
+    console.print(f"  Workspace root: {cfg.workspace.resolved_root()}")
+
+    if cfg.states:
+        console.print(f"\n  [bold]State machine[/bold] ({len(cfg.states)} states):")
+        console.print(f"    Entry state: {cfg.entry_state}")
+        console.print(f"    Linear states: active={cfg.linear_states.active}, review={cfg.linear_states.review}")
+        for name, state in cfg.states.items():
+            transitions = ", ".join(f"{k}->{v}" for k, v in state.transitions.items())
+            console.print(f"    {name} ({state.type}) -> {transitions or 'terminal'}")
+    else:
+        console.print(f"\n  [dim]Legacy mode (no state machine)[/dim]")
+
     console.print()
 
     from .linear import LinearClient
 
     client = LinearClient(
-        endpoint=workflow.config.tracker.endpoint,
-        api_key=workflow.config.resolved_api_key(),
+        endpoint=cfg.tracker.endpoint,
+        api_key=cfg.resolved_api_key(),
     )
 
     try:
         candidates = await client.fetch_candidate_issues(
-            workflow.config.tracker.project_slug,
-            workflow.config.tracker.active_states,
+            cfg.tracker.project_slug,
+            cfg.active_linear_states(),
         )
     except Exception as e:
         console.print(f"[red]Failed to fetch candidates: {e}[/red]")
