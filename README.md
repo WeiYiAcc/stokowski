@@ -14,6 +14,10 @@ A Python implementation of the [OpenAI Symphony](https://github.com/openai/symph
 
 *Named after Leopold Stokowski — the conductor who brought orchestral music to the masses.*
 
+<br>
+
+<img src="docs/dashboard.png" alt="Stokowski web dashboard showing 3 active agents" width="100%">
+
 </div>
 
 ---
