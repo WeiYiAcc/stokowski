@@ -739,6 +739,9 @@ class Orchestrator:
 
             prompt = await self._render_prompt_async(issue, attempt.attempt, state_name)
 
+            # Build env vars for the agent subprocess from workflow.yaml config
+            agent_env = self.cfg.agent_env()
+
             # State machine mode: single turn per dispatch. The state
             # machine handles continuation via _transition after each
             # turn completes — multi-turn loops would bypass gate
@@ -755,6 +758,7 @@ class Orchestrator:
                     attempt=attempt,
                     on_event=self._on_agent_event,
                     on_pid=self._on_child_pid,
+                    env=agent_env,
                 )
             else:
                 # Legacy mode: multi-turn loop
@@ -795,6 +799,7 @@ class Orchestrator:
                         attempt=attempt,
                         on_event=self._on_agent_event,
                         on_pid=self._on_child_pid,
+                        env=agent_env,
                     )
 
                     if attempt.status != "succeeded":

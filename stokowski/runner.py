@@ -86,6 +86,7 @@ async def run_codex_turn(
     on_pid: PidCallback | None = None,
     turn_timeout_ms: int = 3_600_000,
     stall_timeout_ms: int = 300_000,
+    env: dict[str, str] | None = None,
 ) -> RunAttempt:
     """Run a single Codex turn. Returns updated RunAttempt.
 
@@ -124,6 +125,7 @@ async def run_codex_turn(
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
             limit=10 * 1024 * 1024,  # 10MB line buffer (default 64KB)
+            env=env,
         )
         if on_pid and proc.pid:
             on_pid(proc.pid, True)
@@ -243,6 +245,7 @@ async def run_agent_turn(
     attempt: RunAttempt,
     on_event: EventCallback | None = None,
     on_pid: PidCallback | None = None,
+    env: dict[str, str] | None = None,
 ) -> RunAttempt:
     """Run a single Claude Code turn. Returns updated RunAttempt."""
     args = build_claude_args(
@@ -280,6 +283,7 @@ async def run_agent_turn(
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
             limit=10 * 1024 * 1024,  # 10MB line buffer (default 64KB)
+            env=env,
         )
         if on_pid and proc.pid:
             on_pid(proc.pid, True)
@@ -459,6 +463,7 @@ async def run_turn(
     attempt: RunAttempt,
     on_event: EventCallback | None = None,
     on_pid: PidCallback | None = None,
+    env: dict[str, str] | None = None,
 ) -> RunAttempt:
     """Route to the correct runner based on runner_type."""
     if runner_type == "codex":
@@ -472,6 +477,7 @@ async def run_turn(
             on_pid=on_pid,
             turn_timeout_ms=claude_cfg.turn_timeout_ms,
             stall_timeout_ms=claude_cfg.stall_timeout_ms,
+            env=env,
         )
     elif runner_type == "claude":
         return await run_agent_turn(
@@ -483,6 +489,7 @@ async def run_turn(
             attempt=attempt,
             on_event=on_event,
             on_pid=on_pid,
+            env=env,
         )
     else:
         raise ValueError(f"Unknown runner type: {runner_type}")

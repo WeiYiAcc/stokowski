@@ -139,6 +139,22 @@ class ServiceConfig:
             return os.environ.get(key[1:], "")
         return key
 
+    def agent_env(self) -> dict[str, str]:
+        """Build env vars to pass to agent subprocesses.
+
+        Includes the parent process env plus Linear config from workflow.yaml,
+        so agents can connect to Linear using the same credentials as Stokowski.
+        """
+        env = dict(os.environ)
+        api_key = self.resolved_api_key()
+        if api_key:
+            env["LINEAR_API_KEY"] = api_key
+        if self.tracker.project_slug:
+            env["LINEAR_PROJECT_SLUG"] = self.tracker.project_slug
+        if self.tracker.endpoint:
+            env["LINEAR_ENDPOINT"] = self.tracker.endpoint
+        return env
+
     @property
     def entry_state(self) -> str | None:
         """Return the first agent state (first key in states dict)."""
