@@ -51,7 +51,8 @@ class Orchestrator:
         self.total_seconds_running: float = 0
 
         # Internal
-        self._linear: LinearClient | None = None
+        self._tracker: Any = None  # LinearClient or LocalTracker
+        self._linear: LinearClient | None = None  # kept for compatibility
         self._tasks: dict[str, asyncio.Task] = {}
         self._retry_timers: dict[str, asyncio.TimerHandle] = {}
         self._child_pids: set[int] = set()  # Track claude subprocess PIDs
@@ -79,13 +80,27 @@ class Orchestrator:
             return [f"Workflow load error: {e}"]
         return validate_config(self.cfg)
 
+    def _ensure_tracker(self):
+        """Return the tracker client (Linear or Local)."""
+        if self._tracker is None:
+            if self.cfg.tracker.kind == "local":
+                from .local_tracker import LocalTracker
+                self._tracker = LocalTracker(self.cfg.tracker.tasks_dir)
+            else:
+                self._tracker = LinearClient(
+                    endpoint=self.cfg.tracker.endpoint,
+                    api_key=self.cfg.resolved_api_key(),
+                )
+                self._linear = self._tracker
+        return self._tracker
+
     def _ensure_linear_client(self) -> LinearClient:
-        if self._linear is None:
-            self._linear = LinearClient(
-                endpoint=self.cfg.tracker.endpoint,
-                api_key=self.cfg.resolved_api_key(),
-            )
-        return self._linear
+        """Backward-compatible alias."""
+        tracker = self._ensure_tracker()
+        if isinstance(tracker, LinearClient):
+            return tracker
+        # For local tracker, return it anyway — it implements the same interface
+        return tracker
 
     async def start(self):
         """Start the orchestration loop."""

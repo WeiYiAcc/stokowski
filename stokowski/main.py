@@ -406,12 +406,17 @@ async def dry_run(workflow_path: str):
 
     console.print()
 
-    from .linear import LinearClient
-
-    client = LinearClient(
-        endpoint=cfg.tracker.endpoint,
-        api_key=cfg.resolved_api_key(),
-    )
+    if cfg.tracker.kind == "local":
+        from .local_tracker import LocalTracker
+        client = LocalTracker(cfg.tracker.tasks_dir)
+        _closeable = False
+    else:
+        from .linear import LinearClient
+        client = LinearClient(
+            endpoint=cfg.tracker.endpoint,
+            api_key=cfg.resolved_api_key(),
+        )
+        _closeable = True
 
     try:
         candidates = await client.fetch_candidate_issues(
@@ -420,7 +425,8 @@ async def dry_run(workflow_path: str):
         )
     except Exception as e:
         console.print(f"[red]Failed to fetch candidates: {e}[/red]")
-        await client.close()
+        if _closeable:
+            await client.close()
         sys.exit(1)
 
     console.print(f"[bold]Found {len(candidates)} candidate issues:[/bold]\n")
@@ -442,7 +448,8 @@ async def dry_run(workflow_path: str):
         )
 
     console.print(table)
-    await client.close()
+    if _closeable:
+        await client.close()
 
 
 if __name__ == "__main__":

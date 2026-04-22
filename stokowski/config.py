@@ -21,6 +21,7 @@ class TrackerConfig:
     endpoint: str = "https://api.linear.app/graphql"
     api_key: str = ""
     project_slug: str = ""
+    tasks_dir: str = ""  # for kind: local
 
 
 @dataclass
@@ -321,6 +322,7 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
         endpoint=str(t.get("endpoint", "https://api.linear.app/graphql")),
         api_key=str(t.get("api_key", "")),
         project_slug=str(t.get("project_slug", "")),
+        tasks_dir=str(t.get("tasks_dir", "")),
     )
 
     # Parse polling
@@ -413,12 +415,16 @@ def validate_config(cfg: ServiceConfig) -> list[str]:
     errors: list[str] = []
 
     # Basic tracker checks
-    if cfg.tracker.kind != "linear":
+    if cfg.tracker.kind == "linear":
+        if not cfg.resolved_api_key():
+            errors.append("Missing tracker API key (set LINEAR_API_KEY or tracker.api_key)")
+        if not cfg.tracker.project_slug:
+            errors.append("Missing tracker.project_slug")
+    elif cfg.tracker.kind == "local":
+        if not cfg.tracker.tasks_dir:
+            errors.append("Missing tracker.tasks_dir for local tracker")
+    else:
         errors.append(f"Unsupported tracker kind: {cfg.tracker.kind}")
-    if not cfg.resolved_api_key():
-        errors.append("Missing tracker API key (set LINEAR_API_KEY or tracker.api_key)")
-    if not cfg.tracker.project_slug:
-        errors.append("Missing tracker.project_slug")
 
     if not cfg.states:
         errors.append("No states defined")
