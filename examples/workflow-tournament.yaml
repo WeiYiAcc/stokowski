@@ -1,0 +1,86 @@
+# =============================================================================
+# Stokowski — 全自动流水线（无 gate，无人值守）
+# =============================================================================
+# Linear project: stokowski-auto (df340bedf106)
+# 用途: 手机发任务，全自动跑完，Linear 只作日志
+# 启动: stokowski workflow-auto.yaml
+
+tracker:
+  kind: linear
+  project_slug: "df340bedf106"
+  api_key: $LINEAR_API_KEY
+
+linear_states:
+  todo: "Todo"
+  active: "In Progress"
+  review: "Human Review"
+  gate_approved: "Gate Approved"
+  rework: "Rework"
+  terminal:
+    - Done
+    - Closed
+    - Canceled
+    - Duplicate
+
+polling:
+  interval_ms: 15000
+
+workspace:
+  root: ~/agent-state/stokowski-workspaces/auto
+
+hooks:
+  after_create: |
+    echo "workspace ready"
+  before_remove: |
+    cp -r . ~/agent-state/stokowski-results/auto/$(basename $PWD)/ 2>/dev/null
+  timeout_ms: 120000
+
+claude:
+  permission_mode: auto
+  model: claude-sonnet-4-6
+  max_turns: 20
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+
+agent:
+  max_concurrent_agents: 3
+  max_retry_backoff_ms: 300000
+
+prompts:
+  global_prompt: prompts/global.md
+
+# 全自动：investigate → implement → code-review(fresh) → done
+states:
+  investigate:
+    type: agent
+    prompt: prompts/investigate.md
+    linear_state: active
+    model: claude-opus-4-6
+    max_turns: 8
+    session: inherit
+    transitions:
+      complete: implement
+
+  implement:
+    type: agent
+    prompt: prompts/implement.md
+    linear_state: active
+    model: claude-sonnet-4-6
+    max_turns: 40
+    session: inherit
+    transitions:
+      complete: code-review
+
+  code-review:
+    type: agent
+    prompt: prompts/review.md
+    linear_state: active
+    model: claude-opus-4-6
+    max_turns: 10
+    session: fresh
+    transitions:
+      complete: done
+
+  done:
+    type: terminal
+    linear_state: terminal
