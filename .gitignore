@@ -14,6 +14,7 @@ docs/plans/
 workflow.yaml
 workflow.yml
 
-# Prompt files (operator-local, examples are tracked)
+# Prompt files (operator-local, examples and tournament are tracked)
 prompts/*.md
 !prompts/*.example.md
+!prompts/*.tournament.md
