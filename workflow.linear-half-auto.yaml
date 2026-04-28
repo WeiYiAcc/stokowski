@@ -47,7 +47,7 @@ polling:
   interval_ms: 15000
 
 workspace:
-  root: ~/agent-state/stokowski-workspaces/half-auto
+  root: $STOKOWSKI_REPO_ROOT/agent-state/stokowski-workspaces/half-auto
 
 # =============================================================================
 # TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
@@ -76,8 +76,8 @@ hooks:
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
     TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
-    mkdir -p "$HOME/agent-state/stokowski-results/half-auto/"
-    cp -r . "$HOME/agent-state/stokowski-results/half-auto/$(basename "$WS_PATH")/" 2>/dev/null || true
+    mkdir -p "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/half-auto/"
+    cp -r . "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/half-auto/$(basename "$WS_PATH")/" 2>/dev/null || true
     cd "$TARGET_REPO"
     if [ -d ".jj" ]; then
       jj workspace forget "$WS_NAME" 2>/dev/null || true

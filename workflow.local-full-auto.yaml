@@ -36,7 +36,7 @@
 
 tracker:
   kind: local
-  tasks_dir: ~/agent-state/stokowski-tasks/auto
+  tasks_dir: $STOKOWSKI_REPO_ROOT/agent-state/stokowski-tasks/auto
 
 linear_states:
   todo: "Todo"
@@ -53,7 +53,7 @@ polling:
   interval_ms: 15000
 
 workspace:
-  root: ~/agent-state/stokowski-workspaces/local
+  root: $STOKOWSKI_REPO_ROOT/agent-state/stokowski-workspaces/local
 
 # =============================================================================
 # TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
@@ -81,8 +81,8 @@ hooks:
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
     TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
-    mkdir -p "$HOME/agent-state/stokowski-results/local/"
-    cp -r . "$HOME/agent-state/stokowski-results/local/$(basename "$WS_PATH")/" 2>/dev/null || true
+    mkdir -p "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/local/"
+    cp -r . "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/local/$(basename "$WS_PATH")/" 2>/dev/null || true
     cd "$TARGET_REPO"
     if [ -d ".jj" ]; then
       jj workspace forget "$WS_NAME" 2>/dev/null || true

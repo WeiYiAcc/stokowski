@@ -119,11 +119,21 @@ winner before entering `code-review`.
 
 ## Architecture conventions
 
-Most target projects in this workspace follow Polylith (components +
-bases + projects). Read `references/polylith.md` (in the stokowski
-repo) for per-language setup if your task touches architecture.
-Project-specific deviations from Polylith should be called out in the
-issue's `## Implementation Notes`.
+Most target projects follow Polylith (components + bases + projects).
+The Stokowski repo ships per-language reference docs and minimal
+component examples in `$STOKOWSKI_REPO_ROOT/references/`:
+
+- `references/polylith.md` — Polylith rules + workspace layout per language
+- `references/examples/clj-component/` — native Polylith Clojure example
+- `references/examples/py-component/` — polylith-cli Python example
+- `references/examples/ts-component/` — Nx + Effect TypeScript example
+- `references/nix-home-manager.md` — nix-managed environments
+- `references/bb-to-nx-mapping.md` — Babashka task ↔ Nx target mapping
+
+Read the relevant ones when your task touches architecture. The path
+`$STOKOWSKI_REPO_ROOT` is always set by the daemon at launch (see your
+shell's `env | grep STOKOWSKI`). Project-specific deviations from
+Polylith should be called out in the issue's `## Implementation Notes`.
 
 ## Quality bar (verify before final push)
 

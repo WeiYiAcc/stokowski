@@ -10,7 +10,11 @@ log/
 WORKFLOW.md
 docs/plans/
 
-# Workflow config (operator-local, only at repo root — workflows/<id>/ are tracked)
+# Stokowski runtime state (workspaces, results, logs, tasks)
+# All daemon-managed; populated at runtime, never committed.
+/agent-state/
+
+# Workflow config (operator-local — copy from workflow.<mode>.yaml templates)
 /workflow.yaml
 /workflow.yml
 

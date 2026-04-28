@@ -32,7 +32,7 @@ polling:
   interval_ms: 15000
 
 workspace:
-  root: ~/agent-state/stokowski-workspaces/auto
+  root: $STOKOWSKI_REPO_ROOT/agent-state/stokowski-workspaces/auto
 
 # =============================================================================
 # TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
@@ -94,8 +94,8 @@ hooks:
     WS_NAME="stokowski-$(basename "$WS_PATH")"
     TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
     # Archive working-copy state for forensics.
-    mkdir -p "$HOME/agent-state/stokowski-results/auto/"
-    cp -r . "$HOME/agent-state/stokowski-results/auto/$(basename "$WS_PATH")/" 2>/dev/null || true
+    mkdir -p "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/auto/"
+    cp -r . "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/auto/$(basename "$WS_PATH")/" 2>/dev/null || true
     # Detach workspace/worktree (commits remain in main repo).
     cd "$TARGET_REPO"
     if [ -d ".jj" ]; then
