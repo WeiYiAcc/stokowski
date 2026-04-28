@@ -32,7 +32,8 @@ hooks:
   after_create: |
     echo "workspace ready"
   before_remove: |
-    cp -r . ~/agent-state/stokowski-results/auto/$(basename $PWD)/ 2>/dev/null
+    mkdir -p ~/agent-state/stokowski-results/auto/
+    cp -r . ~/agent-state/stokowski-results/auto/$(basename $PWD)/ 2>/dev/null || true
   timeout_ms: 120000
 
 claude:
