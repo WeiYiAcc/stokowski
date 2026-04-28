@@ -1,9 +1,15 @@
 # =============================================================================
-# Stokowski — 半自动流水线（含人工 gate）
+# Stokowski — 半自动流水线模板（Linear tracker，含人工 gate）
 # =============================================================================
-# Linear project: stokowski-auto (df340bedf106)
+# 这是模板。要使用：
+#   1. cp workflow.linear-half-auto.yaml workflow.yaml
+#   2. cp prompts_linear-half-auto/*.md prompts/
+#   3. 编辑 workflow.yaml：填上 your-org/your-target-repo 真实路径
+#                        + your-linear-project-slug 真实 slug
+#                        + 确认 LINEAR_API_KEY 在 env / .env
+#   4. stokowski workflow.yaml
+#
 # 用途: 复杂或高风险改动，每个关键节点暂停等人工审核后再继续
-# 启动: stokowski workflows/20260429T021800--tournament__linear-half-auto/workflow.yaml
 #
 # 与 linear-full-auto 的差异:
 #   - 多 2 个 gate state: research-review (investigate 后) +
@@ -12,7 +18,7 @@
 #   - 人工切到 "Gate Approved" 触发下一阶段；切到 "Rework" 回退重做
 #   - max_rework 限制每个 gate 的返工次数
 #
-# 使用流程:
+# 使用流程（拷贝到 workflow.yaml 后）:
 #   1. 在 Linear 创建 issue (Backlog)
 #   2. 状态改 Todo，stokowski 拾取 → investigate state
 #   3. investigate 完成后状态自动变 Human Review
@@ -22,7 +28,7 @@
 
 tracker:
   kind: linear
-  project_slug: "df340bedf106"
+  project_slug: "your-linear-project-slug"
   api_key: $LINEAR_API_KEY
 
 linear_states:
@@ -44,11 +50,8 @@ workspace:
   root: ~/agent-state/stokowski-workspaces/half-auto
 
 # =============================================================================
-# ⚠️  TARGET_REPO IS HARD-CODED BELOW (same caveat as the full-auto workflow)
-# =============================================================================
-# To target a different repo: copy this directory, change TARGET_REPO in both
-# hooks. See workflows/20260428T160000--tournament__linear-full-auto/workflow.yaml
-# for the long version of the warning.
+# TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
+# 详见 workflow.linear-full-auto.yaml 同位置的注释。
 # =============================================================================
 
 hooks:
@@ -56,7 +59,7 @@ hooks:
     set -euo pipefail
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
     cd "$TARGET_REPO"
     if [ -d ".jj" ]; then
       jj workspace add "$WS_PATH" --name "$WS_NAME"
@@ -72,7 +75,7 @@ hooks:
     set -euo pipefail
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
     mkdir -p "$HOME/agent-state/stokowski-results/half-auto/"
     cp -r . "$HOME/agent-state/stokowski-results/half-auto/$(basename "$WS_PATH")/" 2>/dev/null || true
     cd "$TARGET_REPO"
@@ -100,13 +103,13 @@ agent:
   max_retry_backoff_ms: 300000
 
 prompts:
-  global_prompt: global.md
+  global_prompt: prompts/global.md
 
 # 半自动：investigate → research-review (gate) → implement → implementation-review (gate) → code-review → done
 states:
   investigate:
     type: agent
-    prompt: investigate.md
+    prompt: prompts/investigate.md
     linear_state: active
     model: claude-opus-4-6
     max_turns: 8
@@ -124,7 +127,7 @@ states:
 
   implement:
     type: agent
-    prompt: implement.md
+    prompt: prompts/implement.md
     linear_state: active
     model: claude-sonnet-4-6
     max_turns: 40
@@ -142,7 +145,7 @@ states:
 
   code-review:
     type: agent
-    prompt: review.md
+    prompt: prompts/review.md
     linear_state: active
     model: claude-opus-4-6
     max_turns: 10

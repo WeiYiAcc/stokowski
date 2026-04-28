@@ -1,9 +1,15 @@
 # =============================================================================
-# Stokowski — 本地全自动流水线（无 Linear，无 gate）
+# Stokowski — 本地全自动流水线模板（local file tracker，无 Linear，无 gate）
 # =============================================================================
+# 这是模板。要使用：
+#   1. cp workflow.local-full-auto.yaml workflow.yaml
+#   2. cp prompts_local-full-auto/*.md prompts/
+#   3. 编辑 workflow.yaml：填上 your-org/your-target-repo 真实路径
+#                        + 确认 tasks_dir 目录存在（首次会自动建）
+#   4. stokowski workflow.yaml
+#
 # Tracker: local file-based (tasks dir 下每个 yaml = 一个 issue)
 # 用途: 离线工作 / 不想发 Linear / 测试 workflow / 私密任务
-# 启动: stokowski workflows/20260429T021800--tournament__local-full-auto/workflow.yaml
 #
 # 与 linear-full-auto 的差异:
 #   - tracker.kind: local（drop-in 替代 Linear）
@@ -50,14 +56,15 @@ workspace:
   root: ~/agent-state/stokowski-workspaces/local
 
 # =============================================================================
-# ⚠️  TARGET_REPO IS HARD-CODED BELOW (same caveat as the linear-full-auto workflow)
+# TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
+# 详见 workflow.linear-full-auto.yaml 同位置的注释。
 # =============================================================================
 hooks:
   after_create: |
     set -euo pipefail
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
     cd "$TARGET_REPO"
     if [ -d ".jj" ]; then
       jj workspace add "$WS_PATH" --name "$WS_NAME"
@@ -73,7 +80,7 @@ hooks:
     set -euo pipefail
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
     mkdir -p "$HOME/agent-state/stokowski-results/local/"
     cp -r . "$HOME/agent-state/stokowski-results/local/$(basename "$WS_PATH")/" 2>/dev/null || true
     cd "$TARGET_REPO"
@@ -99,13 +106,13 @@ agent:
   max_retry_backoff_ms: 300000
 
 prompts:
-  global_prompt: global.md
+  global_prompt: prompts/global.md
 
 # 全自动：investigate → implement → code-review(fresh) → done
 states:
   investigate:
     type: agent
-    prompt: investigate.md
+    prompt: prompts/investigate.md
     linear_state: active
     model: claude-opus-4-6
     max_turns: 8
@@ -115,7 +122,7 @@ states:
 
   implement:
     type: agent
-    prompt: implement.md
+    prompt: prompts/implement.md
     linear_state: active
     model: claude-sonnet-4-6
     max_turns: 40
@@ -125,7 +132,7 @@ states:
 
   code-review:
     type: agent
-    prompt: review.md
+    prompt: prompts/review.md
     linear_state: active
     model: claude-opus-4-6
     max_turns: 10
