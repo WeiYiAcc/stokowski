@@ -28,33 +28,66 @@ polling:
 workspace:
   root: ~/agent-state/stokowski-workspaces/auto
 
+# =============================================================================
+# ⚠️  TARGET_REPO IS HARD-CODED BELOW
+# =============================================================================
+# This workflow is currently a single-target pipeline: every issue picked up
+# from Linear (project_slug above) is assumed to target ONE repository, set
+# in the TARGET_REPO env var inside the after_create / before_remove hooks.
+#
+# To run a different target project:
+#   1. Copy this whole directory to a new dated dir, e.g.
+#      workflows/<new-datetime>--tournament__linear-full-auto/
+#   2. Change TARGET_REPO in both hooks below
+#   3. (Optional) Change tracker.project_slug to a different Linear project
+#   4. Start stokowski against the new yaml
+#
+# To make this generic (single yaml, many target repos):
+#   - Encode the target in each Linear issue description (e.g. a label or
+#     a field in the description's frontmatter)
+#   - Have stokowski pass the parsed value to hooks as an env var (requires
+#     a small upstream patch — currently run_hook does not inject env)
+# =============================================================================
+
 hooks:
-  # after_create: turn the empty workspace dir into a jj workspace of the
-  # target repo, so the agent edits an isolated working copy that shares
-  # the underlying jj/git history. This way:
-  #   - 3 issues can run in parallel without working-copy conflicts
-  #   - The agent's commits are visible in the main repo's `jj log`
-  #   - Roll-back is per-ticket (just `jj workspace forget`)
-  #   - The user can keep working in the main workspace concurrently
+  # after_create: convert the empty workspace dir into a working copy of
+  # TARGET_REPO. Uses jj workspace add when the target uses jj; falls back
+  # to git worktree add for plain-git repos.
   #
-  # NOTE: hard-coded to ariadne-fact for now. To support multiple repos,
-  # encode the target repo in the Linear ticket description and parse it
-  # in this hook (future work).
+  # Outcomes:
+  #   - 3 issues can run in parallel without working-copy conflicts
+  #   - The agent's commits are visible in the main repo's history
+  #   - Roll-back is per-ticket (just forget the workspace / remove the worktree)
+  #   - The user can keep working in the main repo concurrently
   after_create: |
     set -euo pipefail
     WS_PATH="$(pwd -P)"
     WS_NAME="stokowski-$(basename "$WS_PATH")"
     TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
     cd "$TARGET_REPO"
-    # `jj workspace add` accepts an empty existing dir; populates it with
-    # working-copy files and adds it to `jj workspace list`.
-    jj workspace add "$WS_PATH" --name "$WS_NAME"
-    echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
+    if [ -d ".jj" ]; then
+      # jj workspace add accepts an empty existing dir; populates it with
+      # working-copy files and adds it to `jj workspace list`.
+      jj workspace add "$WS_PATH" --name "$WS_NAME"
+      echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
+    else
+      # Plain git fallback: use git worktree with a per-issue branch.
+      # NOTE: this branch is UNTESTED end-to-end (no actual stokowski run on
+      # a git-only target yet, only smoke-tested manually). The push protocol
+      # in global.md assumes the agent pushes directly to master; under git
+      # the agent is on a side branch (stokowski-<id>), so `git push origin
+      # HEAD:master` is required and may need rebase. Audit before first
+      # real use against a git target.
+      rmdir "$WS_PATH"
+      DEFAULT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+      git worktree add -B "$WS_NAME" "$WS_PATH" "$DEFAULT_BRANCH"
+      echo "[after_create] git worktree created at $WS_PATH (branch=$WS_NAME from $DEFAULT_BRANCH)"
+    fi
 
   # before_remove: archive the workspace's final state and detach the jj
-  # workspace before stokowski rmtree's the dir. The actual jj objects
-  # (commits) stay in the main repo's .jj — only the working copy is
-  # detached.
+  # workspace (or remove the git worktree) before stokowski rmtree's the
+  # dir. The actual commits stay in the main repo — only the working copy
+  # is detached.
   before_remove: |
     set -euo pipefail
     WS_PATH="$(pwd -P)"
@@ -63,10 +96,19 @@ hooks:
     # Archive working-copy state for forensics.
     mkdir -p "$HOME/agent-state/stokowski-results/auto/"
     cp -r . "$HOME/agent-state/stokowski-results/auto/$(basename "$WS_PATH")/" 2>/dev/null || true
-    # Detach jj workspace (commits remain in main repo).
+    # Detach workspace/worktree (commits remain in main repo).
     cd "$TARGET_REPO"
-    jj workspace forget "$WS_NAME" 2>/dev/null || true
-    echo "[before_remove] detached jj workspace $WS_NAME"
+    if [ -d ".jj" ]; then
+      jj workspace forget "$WS_NAME" 2>/dev/null || true
+      echo "[before_remove] detached jj workspace $WS_NAME"
+    else
+      # Detach worktree but KEEP the branch (it holds the agent's commits;
+      # human reviewer can git merge / git cherry-pick / git push from main
+      # repo afterwards). The branch is named $WS_NAME so it's discoverable
+      # via `git branch | grep stokowski-`.
+      git worktree remove --force "$WS_PATH" 2>/dev/null || true
+      echo "[before_remove] removed git worktree at $WS_PATH (branch $WS_NAME kept for review)"
+    fi
 
   timeout_ms: 120000
 
