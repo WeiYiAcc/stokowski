@@ -29,11 +29,45 @@ workspace:
   root: ~/agent-state/stokowski-workspaces/auto
 
 hooks:
+  # after_create: turn the empty workspace dir into a jj workspace of the
+  # target repo, so the agent edits an isolated working copy that shares
+  # the underlying jj/git history. This way:
+  #   - 3 issues can run in parallel without working-copy conflicts
+  #   - The agent's commits are visible in the main repo's `jj log`
+  #   - Roll-back is per-ticket (just `jj workspace forget`)
+  #   - The user can keep working in the main workspace concurrently
+  #
+  # NOTE: hard-coded to ariadne-fact for now. To support multiple repos,
+  # encode the target repo in the Linear ticket description and parse it
+  # in this hook (future work).
   after_create: |
-    echo "workspace ready"
+    set -euo pipefail
+    WS_PATH="$(pwd -P)"
+    WS_NAME="stokowski-$(basename "$WS_PATH")"
+    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    cd "$TARGET_REPO"
+    # `jj workspace add` accepts an empty existing dir; populates it with
+    # working-copy files and adds it to `jj workspace list`.
+    jj workspace add "$WS_PATH" --name "$WS_NAME"
+    echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
+
+  # before_remove: archive the workspace's final state and detach the jj
+  # workspace before stokowski rmtree's the dir. The actual jj objects
+  # (commits) stay in the main repo's .jj — only the working copy is
+  # detached.
   before_remove: |
-    mkdir -p ~/agent-state/stokowski-results/auto/
-    cp -r . ~/agent-state/stokowski-results/auto/$(basename $PWD)/ 2>/dev/null || true
+    set -euo pipefail
+    WS_PATH="$(pwd -P)"
+    WS_NAME="stokowski-$(basename "$WS_PATH")"
+    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    # Archive working-copy state for forensics.
+    mkdir -p "$HOME/agent-state/stokowski-results/auto/"
+    cp -r . "$HOME/agent-state/stokowski-results/auto/$(basename "$WS_PATH")/" 2>/dev/null || true
+    # Detach jj workspace (commits remain in main repo).
+    cd "$TARGET_REPO"
+    jj workspace forget "$WS_NAME" 2>/dev/null || true
+    echo "[before_remove] detached jj workspace $WS_NAME"
+
   timeout_ms: 120000
 
 claude:
