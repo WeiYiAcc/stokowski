@@ -1,0 +1,155 @@
+# =============================================================================
+# Stokowski — 半自动流水线（含人工 gate）
+# =============================================================================
+# Linear project: stokowski-auto (df340bedf106)
+# 用途: 复杂或高风险改动，每个关键节点暂停等人工审核后再继续
+# 启动: stokowski workflows/20260429T021800--tournament__linear-half-auto/workflow.yaml
+#
+# 与 linear-full-auto 的差异:
+#   - 多 2 个 gate state: research-review (investigate 后) +
+#     implementation-review (implement 后)
+#   - gate 期间 Linear issue 状态会变成 "Human Review"
+#   - 人工切到 "Gate Approved" 触发下一阶段；切到 "Rework" 回退重做
+#   - max_rework 限制每个 gate 的返工次数
+#
+# 使用流程:
+#   1. 在 Linear 创建 issue (Backlog)
+#   2. 状态改 Todo，stokowski 拾取 → investigate state
+#   3. investigate 完成后状态自动变 Human Review
+#   4. 你 review 后切 Gate Approved → implement state
+#   5. implement 完成 → 又一次 Human Review → 切 Gate Approved → code-review
+#   6. code-review 通过 → Done
+
+tracker:
+  kind: linear
+  project_slug: "df340bedf106"
+  api_key: $LINEAR_API_KEY
+
+linear_states:
+  todo: "Todo"
+  active: "In Progress"
+  review: "Human Review"
+  gate_approved: "Gate Approved"
+  rework: "Rework"
+  terminal:
+    - Done
+    - Closed
+    - Canceled
+    - Duplicate
+
+polling:
+  interval_ms: 15000
+
+workspace:
+  root: ~/agent-state/stokowski-workspaces/half-auto
+
+# =============================================================================
+# ⚠️  TARGET_REPO IS HARD-CODED BELOW (same caveat as the full-auto workflow)
+# =============================================================================
+# To target a different repo: copy this directory, change TARGET_REPO in both
+# hooks. See workflows/20260428T160000--tournament__linear-full-auto/workflow.yaml
+# for the long version of the warning.
+# =============================================================================
+
+hooks:
+  after_create: |
+    set -euo pipefail
+    WS_PATH="$(pwd -P)"
+    WS_NAME="stokowski-$(basename "$WS_PATH")"
+    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    cd "$TARGET_REPO"
+    if [ -d ".jj" ]; then
+      jj workspace add "$WS_PATH" --name "$WS_NAME"
+      echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
+    else
+      rmdir "$WS_PATH"
+      DEFAULT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+      git worktree add -B "$WS_NAME" "$WS_PATH" "$DEFAULT_BRANCH"
+      echo "[after_create] git worktree created at $WS_PATH (branch=$WS_NAME from $DEFAULT_BRANCH)"
+    fi
+
+  before_remove: |
+    set -euo pipefail
+    WS_PATH="$(pwd -P)"
+    WS_NAME="stokowski-$(basename "$WS_PATH")"
+    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    mkdir -p "$HOME/agent-state/stokowski-results/half-auto/"
+    cp -r . "$HOME/agent-state/stokowski-results/half-auto/$(basename "$WS_PATH")/" 2>/dev/null || true
+    cd "$TARGET_REPO"
+    if [ -d ".jj" ]; then
+      jj workspace forget "$WS_NAME" 2>/dev/null || true
+      echo "[before_remove] detached jj workspace $WS_NAME"
+    else
+      git worktree remove --force "$WS_PATH" 2>/dev/null || true
+      echo "[before_remove] removed git worktree at $WS_PATH (branch $WS_NAME kept for review)"
+    fi
+
+  timeout_ms: 120000
+
+claude:
+  permission_mode: auto
+  model: claude-sonnet-4-6
+  max_turns: 20
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+
+agent:
+  max_concurrent_agents: 3
+  max_concurrent_agents_by_state:
+    code-review: 1   # 串行 review 防 merge 冲突
+  max_retry_backoff_ms: 300000
+
+prompts:
+  global_prompt: global.md
+
+# 半自动：investigate → research-review (gate) → implement → implementation-review (gate) → code-review → done
+states:
+  investigate:
+    type: agent
+    prompt: investigate.md
+    linear_state: active
+    model: claude-opus-4-6
+    max_turns: 8
+    session: inherit
+    transitions:
+      complete: research-review
+
+  research-review:
+    type: gate
+    linear_state: review
+    rework_to: investigate
+    max_rework: 3
+    transitions:
+      approve: implement
+
+  implement:
+    type: agent
+    prompt: implement.md
+    linear_state: active
+    model: claude-sonnet-4-6
+    max_turns: 40
+    session: inherit
+    transitions:
+      complete: implementation-review
+
+  implementation-review:
+    type: gate
+    linear_state: review
+    rework_to: implement
+    max_rework: 5
+    transitions:
+      approve: code-review
+
+  code-review:
+    type: agent
+    prompt: review.md
+    linear_state: active
+    model: claude-opus-4-6
+    max_turns: 10
+    session: fresh
+    transitions:
+      complete: done
+
+  done:
+    type: terminal
+    linear_state: terminal

@@ -1,0 +1,138 @@
+# =============================================================================
+# Stokowski — 本地全自动流水线（无 Linear，无 gate）
+# =============================================================================
+# Tracker: local file-based (tasks dir 下每个 yaml = 一个 issue)
+# 用途: 离线工作 / 不想发 Linear / 测试 workflow / 私密任务
+# 启动: stokowski workflows/20260429T021800--tournament__local-full-auto/workflow.yaml
+#
+# 与 linear-full-auto 的差异:
+#   - tracker.kind: local（drop-in 替代 Linear）
+#   - tasks_dir: 任务文件存放目录（每个 .yaml = 一个 task）
+#   - 状态切换通过编辑 yaml 里的 state 字段（人工 vi 改）
+#   - comments 输出到 .log sidecar 文件（同名 .log）
+#
+# 任务文件格式（tasks_dir/<id>.yaml）:
+#   title: "Implement feature X"
+#   description: |
+#     ## Summary
+#     ...
+#     ## Implementation Notes
+#     ...
+#     ## Acceptance Criteria
+#     ```json
+#     {"criteria": [...]}
+#     ```
+#   state: "Todo"        # 改 Todo 触发拾取
+#   priority: 1          # 数字越小越先拾取
+#   labels: []
+#
+# 状态名虽然字段叫 linear_states，但 local 模式下也是直接对比这些字符串。
+
+tracker:
+  kind: local
+  tasks_dir: ~/agent-state/stokowski-tasks/auto
+
+linear_states:
+  todo: "Todo"
+  active: "In Progress"
+  review: "Human Review"
+  gate_approved: "Gate Approved"
+  rework: "Rework"
+  terminal:
+    - Done
+    - Closed
+    - Canceled
+
+polling:
+  interval_ms: 15000
+
+workspace:
+  root: ~/agent-state/stokowski-workspaces/local
+
+# =============================================================================
+# ⚠️  TARGET_REPO IS HARD-CODED BELOW (same caveat as the linear-full-auto workflow)
+# =============================================================================
+hooks:
+  after_create: |
+    set -euo pipefail
+    WS_PATH="$(pwd -P)"
+    WS_NAME="stokowski-$(basename "$WS_PATH")"
+    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    cd "$TARGET_REPO"
+    if [ -d ".jj" ]; then
+      jj workspace add "$WS_PATH" --name "$WS_NAME"
+      echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
+    else
+      rmdir "$WS_PATH"
+      DEFAULT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+      git worktree add -B "$WS_NAME" "$WS_PATH" "$DEFAULT_BRANCH"
+      echo "[after_create] git worktree created at $WS_PATH (branch=$WS_NAME from $DEFAULT_BRANCH)"
+    fi
+
+  before_remove: |
+    set -euo pipefail
+    WS_PATH="$(pwd -P)"
+    WS_NAME="stokowski-$(basename "$WS_PATH")"
+    TARGET_REPO="$HOME/ghq/github.com/WeiYiAcc/ariadne-fact"
+    mkdir -p "$HOME/agent-state/stokowski-results/local/"
+    cp -r . "$HOME/agent-state/stokowski-results/local/$(basename "$WS_PATH")/" 2>/dev/null || true
+    cd "$TARGET_REPO"
+    if [ -d ".jj" ]; then
+      jj workspace forget "$WS_NAME" 2>/dev/null || true
+      echo "[before_remove] detached jj workspace $WS_NAME"
+    else
+      git worktree remove --force "$WS_PATH" 2>/dev/null || true
+      echo "[before_remove] removed git worktree at $WS_PATH (branch $WS_NAME kept for review)"
+    fi
+
+  timeout_ms: 120000
+
+claude:
+  permission_mode: auto
+  model: claude-sonnet-4-6
+  max_turns: 20
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+
+agent:
+  max_concurrent_agents: 3
+  max_retry_backoff_ms: 300000
+
+prompts:
+  global_prompt: global.md
+
+# 全自动：investigate → implement → code-review(fresh) → done
+states:
+  investigate:
+    type: agent
+    prompt: investigate.md
+    linear_state: active
+    model: claude-opus-4-6
+    max_turns: 8
+    session: inherit
+    transitions:
+      complete: implement
+
+  implement:
+    type: agent
+    prompt: implement.md
+    linear_state: active
+    model: claude-sonnet-4-6
+    max_turns: 40
+    session: inherit
+    transitions:
+      complete: code-review
+
+  code-review:
+    type: agent
+    prompt: review.md
+    linear_state: active
+    model: claude-opus-4-6
+    max_turns: 10
+    session: fresh
+    transitions:
+      complete: done
+
+  done:
+    type: terminal
+    linear_state: terminal
