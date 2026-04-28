@@ -10,11 +10,11 @@ log/
 WORKFLOW.md
 docs/plans/
 
-# Workflow config (operator-local)
-workflow.yaml
-workflow.yml
+# Workflow config (operator-local, only at repo root — workflows/<id>/ are tracked)
+/workflow.yaml
+/workflow.yml
 
 # Prompt files (operator-local, examples and tournament are tracked)
 prompts/*.md
 !prompts/*.example.md
-!prompts/*.tournament.md
+!prompts/*.tournament.example.md

@@ -82,13 +82,13 @@ agent:
   max_retry_backoff_ms: 300000
 
 prompts:
-  global_prompt: prompts/global.md
+  global_prompt: global.md
 
 # 全自动：investigate → implement → code-review(fresh) → done
 states:
   investigate:
     type: agent
-    prompt: prompts/investigate.md
+    prompt: investigate.md
     linear_state: active
     model: claude-opus-4-6
     max_turns: 8
@@ -98,7 +98,7 @@ states:
 
   implement:
     type: agent
-    prompt: prompts/implement.md
+    prompt: implement.md
     linear_state: active
     model: claude-sonnet-4-6
     max_turns: 40
@@ -108,7 +108,7 @@ states:
 
   code-review:
     type: agent
-    prompt: prompts/review.md
+    prompt: review.md
     linear_state: active
     model: claude-opus-4-6
     max_turns: 10
