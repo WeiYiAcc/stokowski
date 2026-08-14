@@ -117,6 +117,7 @@ states:
     prompt: prompts/investigate.md
     linear_state: active
     runner: codex
+    # multica_assignee: opencode    # 可选：本 stage 的 sub-issue 分派给任意 Multica agent/squad（缺省用 tracker.provider.assignee）
     max_turns: 8
     session: inherit
     transitions:

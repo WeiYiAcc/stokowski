@@ -102,6 +102,7 @@ class StateConfig:
     prompt: str | None = None        # path to prompt .md file
     linear_state: str = "active"     # key into LinearStatesConfig
     runner: str = "claude"
+    multica_assignee: str = ""      # multica only: which agent/squad runs this stage's sub-issue (falls back to tracker.provider.assignee)
     model: str | None = None
     max_turns: int | None = None
     turn_timeout_ms: int | None = None
@@ -258,7 +259,7 @@ def _parse_state_config(name: str, raw: dict[str, Any]) -> StateConfig:
         prompt=raw.get("prompt"),
         linear_state=str(raw.get("linear_state", "active")),
         runner=str(raw.get("runner", "claude")),
-        model=raw.get("model"),
+        multica_assignee=str(raw.get("multica_assignee", "")),
         max_turns=raw.get("max_turns"),
         turn_timeout_ms=raw.get("turn_timeout_ms"),
         stall_timeout_ms=raw.get("stall_timeout_ms"),

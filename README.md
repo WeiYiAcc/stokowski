@@ -534,9 +534,13 @@ sub-issue via the Multica CLI (`--parent <parent> --status todo --assignee
 (both count as stage success — Multica agents conventionally end a finished
 sub-issue in `in_review`, awaiting review; the parent-level gate is where human
 review happens), `blocked`/`cancelled` (failure → retry), or the stage timeout.
-`runner: codex` in the state config is metadata that documents which agent
-class the sub-issue should be assigned to; actual execution happens on the
-Multica side.
+The runner is decoupled from any particular CLI: the sub-issue assignee comes
+from the state's `multica_assignee` (any Multica agent name/UUID — or a squad
+name, which routes to the squad leader), falling back to
+`tracker.provider.assignee`. So each stage can dispatch to a different Multica
+agent (e.g. `multica_assignee: codex` vs `opencode` vs `claude-code`). The
+`runner: codex` field is just metadata; actual execution happens on the Multica
+side. `stokowski` itself never spawns codex/claude subprocesses.
 
 ### Template
 

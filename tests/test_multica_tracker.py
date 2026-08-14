@@ -500,6 +500,74 @@ def test_multica_run_stage_succeeds_when_subissue_in_review(tmp_path, fake_bin, 
     assert result.status == "succeeded"
     assert result.session_id == "sub-100"
 
+def test_multica_run_stage_per_state_assignee(tmp_path, fake_bin, state_file):
+    """The runner is decoupled: a state's multica_assignee selects the Multica
+    agent/squad for that stage's sub-issue, overriding provider.assignee."""
+    wf = _write_workflow(tmp_path, fake_bin)
+    seed(
+        state_file,
+        issues=[issue(id="iss-1", status="in_progress")],
+        auto_done_after={"sub-100": 1},
+    )
+    orch = _gate_orchestrator(wf)
+    orch._issue_state_runs = {"iss-1": 1}
+    orch._last_issues = {
+        "iss-1": Issue(id="iss-1", identifier="WEI-1", title="T", state="in_progress")
+    }
+    attempt = RunAttempt(issue_id="iss-1", issue_identifier="WEI-1", state_name="investigate")
+    state_cfg = orch.cfg.states["investigate"]
+    state_cfg.multica_assignee = "opencode"  # any Multica agent/squad
+    claude_cfg = ClaudeConfig(turn_timeout_ms=10_000)
+    ws = SimpleNamespace(path=str(tmp_path / "ws"))
+
+    result = run(
+        orch._run_multica_stage(
+            issue=orch._last_issues["iss-1"],
+            attempt=attempt,
+            state_name="investigate",
+            state_cfg=state_cfg,
+            claude_cfg=claude_cfg,
+            prompt="Do the investigation.",
+            ws=ws,
+        )
+    )
+    assert result.status == "succeeded"
+    data = read_state(state_file)
+    assert data["issues"][-1]["assignee"] == "opencode"
+
+
+def test_multica_run_stage_assignee_falls_back_to_provider(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)  # provider.assignee = "codex"
+    seed(
+        state_file,
+        issues=[issue(id="iss-1", status="in_progress")],
+        auto_done_after={"sub-100": 1},
+    )
+    orch = _gate_orchestrator(wf)
+    orch._issue_state_runs = {"iss-1": 1}
+    orch._last_issues = {
+        "iss-1": Issue(id="iss-1", identifier="WEI-1", title="T", state="in_progress")
+    }
+    attempt = RunAttempt(issue_id="iss-1", issue_identifier="WEI-1", state_name="investigate")
+    state_cfg = orch.cfg.states["investigate"]  # no multica_assignee set
+    claude_cfg = ClaudeConfig(turn_timeout_ms=10_000)
+    ws = SimpleNamespace(path=str(tmp_path / "ws"))
+
+    result = run(
+        orch._run_multica_stage(
+            issue=orch._last_issues["iss-1"],
+            attempt=attempt,
+            state_name="investigate",
+            state_cfg=state_cfg,
+            claude_cfg=claude_cfg,
+            prompt="Do the investigation.",
+            ws=ws,
+        )
+    )
+    assert result.status == "succeeded"
+    data = read_state(state_file)
+    assert data["issues"][-1]["assignee"] == "codex"
+
 
 def test_multica_run_stage_failure_when_blocked(tmp_path, fake_bin, state_file):
     wf = _write_workflow(tmp_path, fake_bin)

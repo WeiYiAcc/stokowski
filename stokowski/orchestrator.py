@@ -878,8 +878,10 @@ class Orchestrator:
 
         Stokowski never spawns an inner agent. Each stage becomes a Multica
         sub-issue under the parent issue — a visible run record — assigned to
-        the configured codex agent; the orchestrator only creates it and polls
-        until it reaches a terminal state.
+        a Multica agent (or squad) and the orchestrator only creates it and
+        polls until it reaches a terminal state. The runner is fully decoupled:
+        the assignee is the state's ``multica_assignee`` (any Multica agent or
+        squad) or, when unset, the tracker's provider.assignee.
         """
         tracker = self._ensure_tracker()
         run = self._issue_state_runs.get(issue.id, 1)
@@ -889,7 +891,13 @@ class Orchestrator:
             issue, state_name, state_cfg, run, prompt, ws
         )
         stage = self._stage_ordinal(state_name)
-        assignee = getattr(tracker, "assignee", "") or ""
+        # Decoupled runner: per-state multica_assignee wins, else the provider
+        # default. Works with any Multica agent name/UUID or squad name.
+        assignee = (
+            state_cfg.multica_assignee
+            if state_cfg and getattr(state_cfg, "multica_assignee", "")
+            else (getattr(tracker, "assignee", "") or "")
+        )
 
         attempt.status = "streaming"
         attempt.started_at = attempt.started_at or datetime.now(timezone.utc)
