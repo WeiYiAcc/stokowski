@@ -48,7 +48,11 @@ MULTICA_STATUSES = {
 }
 
 # Terminal statuses used by wait_for_issue_done / cleanup.
-TERMINAL_STATUSES = {"done", "cancelled", "closed"}
+# "in_review" counts as stage completion: Multica agents conventionally set a
+# finished sub-issue to in_review (awaiting review) rather than done. For a
+# stage sub-issue that is a success — the parent-level gate is where human
+# review actually happens.
+TERMINAL_STATUSES = {"done", "cancelled", "closed", "in_review"}
 
 # Alias map from Linear/logical state names to Multica statuses.
 _STATE_ALIASES = {
@@ -432,7 +436,9 @@ class MulticaTracker:
     ) -> str:
         """Poll a sub-issue until it reaches a terminal state.
 
-        Returns the final status: "done", "cancelled", "blocked", or "timeout".
+        Returns the final status: "done", "in_review", "cancelled", "blocked",
+        or "timeout". "in_review" is treated as a successful completion because
+        Multica agents end finished sub-issues in in_review.
         """
         interval_s = max((poll_interval_ms or self.poll_interval_ms) / 1000, 2.0)
         deadline = time.monotonic() + timeout_ms / 1000

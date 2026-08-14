@@ -530,10 +530,13 @@ later gate.
 
 `_run_multica_stage` replaces the claude/codex subprocess runner: it creates a
 sub-issue via the Multica CLI (`--parent <parent> --status todo --assignee
-<agent> --stage <ordinal>`), then polls until it reaches `done` (success),
-`blocked`/`cancelled` (failure → retry), or the stage timeout. `runner: codex`
-in the state config is metadata that documents which agent class the sub-issue
-should be assigned to; actual execution happens on the Multica side.
+<agent> --stage <ordinal>`), then polls until it reaches `done` or `in_review`
+(both count as stage success — Multica agents conventionally end a finished
+sub-issue in `in_review`, awaiting review; the parent-level gate is where human
+review happens), `blocked`/`cancelled` (failure → retry), or the stage timeout.
+`runner: codex` in the state config is metadata that documents which agent
+class the sub-issue should be assigned to; actual execution happens on the
+Multica side.
 
 ### Template
 

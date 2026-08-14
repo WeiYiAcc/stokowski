@@ -270,6 +270,10 @@ def test_wait_for_issue_done(fake_bin, state_file):
     tracker = make_tracker(fake_bin, state_file)
     assert run(tracker.wait_for_issue_done("done-1", timeout_ms=5000)) == "done"
 
+    # Multica agents end finished sub-issues in in_review -> stage completion
+    seed(state_file, issues=[issue(id="rev-1", status="in_review")])
+    assert run(tracker.wait_for_issue_done("rev-1", timeout_ms=5000)) == "in_review"
+
     seed(state_file, issues=[issue(id="blk-1", status="blocked")])
     assert run(tracker.wait_for_issue_done("blk-1", timeout_ms=5000)) == "blocked"
 
@@ -458,6 +462,41 @@ def test_multica_run_stage_creates_and_polls_subissue(tmp_path, fake_bin, state_
     assert data["issues"][-1]["parent_issue_id"] == "iss-1"
     assert data["issues"][-1]["stage"] == 1
     assert "Do the investigation." in data["issues"][-1]["description"]
+
+def test_multica_run_stage_succeeds_when_subissue_in_review(tmp_path, fake_bin, state_file):
+    # A Multica agent ends a finished stage sub-issue in in_review (its
+    # convention) — Stokowski must treat that as stage completion.
+    wf = _write_workflow(tmp_path, fake_bin)
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            issue(id="sub-100", status="in_review"),
+        ],
+    )
+    orch = _gate_orchestrator(wf)
+    orch._issue_state_runs = {"iss-1": 1}
+    orch._last_issues = {
+        "iss-1": Issue(id="iss-1", identifier="WEI-1", title="T", state="in_progress")
+    }
+    attempt = RunAttempt(issue_id="iss-1", issue_identifier="WEI-1", state_name="investigate")
+    state_cfg = orch.cfg.states["investigate"]
+    claude_cfg = ClaudeConfig(turn_timeout_ms=10_000)
+    ws = SimpleNamespace(path=str(tmp_path / "ws"))
+
+    result = run(
+        orch._run_multica_stage(
+            issue=orch._last_issues["iss-1"],
+            attempt=attempt,
+            state_name="investigate",
+            state_cfg=state_cfg,
+            claude_cfg=claude_cfg,
+            prompt="Do the investigation.",
+            ws=ws,
+        )
+    )
+    assert result.status == "succeeded"
+    assert result.session_id == "sub-100"
 
 
 def test_multica_run_stage_failure_when_blocked(tmp_path, fake_bin, state_file):

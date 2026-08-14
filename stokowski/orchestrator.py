@@ -921,7 +921,10 @@ class Orchestrator:
         attempt.last_message = f"stage sub-issue {sub_id} → {final}"
         attempt.last_event_at = datetime.now(timezone.utc)
 
-        if final == "done":
+        # A Multica agent ends a finished stage sub-issue in "done" or, by
+        # convention, "in_review" (awaiting review). Both mean the stage's work
+        # is complete — human review happens at the parent-level gate.
+        if final in ("done", "in_review"):
             attempt.status = "succeeded"
         else:
             attempt.status = "failed"
