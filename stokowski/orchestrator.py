@@ -643,6 +643,12 @@ class Orchestrator:
 
     def _dispatch(self, issue: Issue, attempt_num: int | None = None):
         """Dispatch a worker for an issue."""
+        # Guard against double dispatch: a gate-approval transition schedules a
+        # retry (1s) and the same poll tick can also re-pick the now-active
+        # issue, which previously spawned duplicate workers and let a stale
+        # worker's completion drive an out-of-order transition.
+        if issue.id in self.running:
+            return
         self.claimed.add(issue.id)
 
         state_name = self._issue_current_state.get(issue.id)
