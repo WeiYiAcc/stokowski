@@ -387,8 +387,13 @@ async def dry_run(workflow_path: str):
 
     cfg = workflow.config
     console.print("[green]Config valid[/green]")
+    display_project = (
+        (cfg.tracker.provider or {}).get("project_id")
+        or cfg.tracker.project_slug
+        or ""
+    )
     console.print(f"  Tracker: {cfg.tracker.kind}")
-    console.print(f"  Project: {cfg.tracker.project_slug}")
+    console.print(f"  Project: {display_project}")
     console.print(f"  Max agents: {cfg.agent.max_concurrent_agents}")
     console.print(f"  Claude model: {cfg.claude.model or 'default'}")
     console.print(f"  Permission mode: {cfg.claude.permission_mode}")
@@ -410,6 +415,13 @@ async def dry_run(workflow_path: str):
         from .local_tracker import LocalTracker
         client = LocalTracker(cfg.tracker.tasks_dir)
         _closeable = False
+    elif cfg.tracker.kind == "multica":
+        from .multica_tracker import MulticaTracker
+        client = MulticaTracker(
+            cfg.tracker,
+            poll_interval_ms=cfg.polling.interval_ms,
+        )
+        _closeable = True
     else:
         from .linear import LinearClient
         client = LinearClient(

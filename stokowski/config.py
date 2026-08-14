@@ -22,6 +22,8 @@ class TrackerConfig:
     api_key: str = ""
     project_slug: str = ""
     tasks_dir: str = ""  # for kind: local
+    provider: dict[str, Any] = field(default_factory=dict)  # for kind: multica (project_id, workspace_id, assignee)
+    multica_bin: str = ""  # for kind: multica (CLI path; overrides MULTICA_BIN env)
 
 
 @dataclass
@@ -323,6 +325,8 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
         api_key=str(t.get("api_key", "")),
         project_slug=str(t.get("project_slug", "")),
         tasks_dir=str(t.get("tasks_dir", "")),
+        provider=t.get("provider") or {},
+        multica_bin=str(t.get("multica_bin", "")),
     )
 
     # Parse polling
@@ -423,6 +427,13 @@ def validate_config(cfg: ServiceConfig) -> list[str]:
     elif cfg.tracker.kind == "local":
         if not cfg.tracker.tasks_dir:
             errors.append("Missing tracker.tasks_dir for local tracker")
+    elif cfg.tracker.kind == "multica":
+        provider = cfg.tracker.provider or {}
+        if not (provider.get("project_id") or cfg.tracker.project_slug):
+            errors.append(
+                "Missing tracker.provider.project_id for multica tracker "
+                "(the Multica project UUID)"
+            )
     else:
         errors.append(f"Unsupported tracker kind: {cfg.tracker.kind}")
 

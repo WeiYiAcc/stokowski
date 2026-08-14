@@ -457,6 +457,100 @@ Open `http://localhost:4200` for the live dashboard.
 
 ---
 
+## Multica tracker (`tracker.kind: multica`)
+
+Stokowski's declarative state machine can run against **Multica** as the
+execution and review backend instead of Linear. You keep the same
+`workflow.yaml` state machine, but:
+
+- every **agent stage** becomes a Multica **sub-issue** (a visible run record)
+  assigned to a codex-class agent — Stokowski never spawns an inner agent
+  itself (observability rule)
+- every **gate** moves the issue to `in_review` and is decided by a human
+  commenting **`approve`** or **`rework`** on the issue
+
+### Configuration
+
+```yaml
+tracker:
+  kind: multica
+  provider:
+    project_id: "<multica-project-uuid>"   # required — Multica project ID
+    workspace_id: "<workspace-uuid>"       # optional
+    assignee: "codex"                      # sub-issue assignee (codex-class agent)
+  # multica_bin: "/path/to/multica"        # optional CLI path (see below)
+```
+
+The CLI is resolved from `tracker.multica_bin`, else the `MULTICA_BIN`
+environment variable, else `multica` on PATH. The adapter strips HTTP(S)
+proxies from the subprocess env (a stale `HTTPS_PROXY` pointing at a local
+proxy blocks the Multica CLI).
+
+### State mapping
+
+`linear_states` must use Multica statuses (the adapter also accepts the Linear
+names and maps them):
+
+| `linear_states` key | Multica status |
+|---|---|
+| `todo` | `todo` |
+| `active` | `in_progress` |
+| `review` | `in_review` |
+| `gate_approved` | `in_review` (decided by comment, not a real state) |
+| `rework` | `blocked` |
+| `terminal` | `done`, `cancelled` |
+
+```yaml
+linear_states:
+  todo: "todo"
+  active: "in_progress"
+  review: "in_review"
+  gate_approved: "in_review"
+  rework: "blocked"
+  terminal: [done, cancelled]
+```
+
+### Gate protocol (comment-driven)
+
+1. When an agent stage completes, the issue moves to `in_review` and Stokowski
+   posts a gate "waiting" tracking comment.
+2. A human reviews the sub-issues / workspace and comments on the issue:
+   - `approve` → Stokowski posts an approved comment and advances to the next
+     state.
+   - `rework` → Stokowski posts a rework comment, increments the run counter,
+     moves the issue back to `in_progress`, and re-dispatches `rework_to`.
+3. Rework counts against the gate's `max_rework`; once exceeded the issue stays
+   in `in_review` and an **escalated** comment is posted for human intervention.
+
+Only comments newer than the current gate's waiting comment count are
+considered, so an old `approve` from a previous cycle cannot auto-advance a
+later gate.
+
+### Execution rule (no inner agents)
+
+`_run_multica_stage` replaces the claude/codex subprocess runner: it creates a
+sub-issue via the Multica CLI (`--parent <parent> --status todo --assignee
+<agent> --stage <ordinal>`), then polls until it reaches `done` (success),
+`blocked`/`cancelled` (failure → retry), or the stage timeout. `runner: codex`
+in the state config is metadata that documents which agent class the sub-issue
+should be assigned to; actual execution happens on the Multica side.
+
+### Template
+
+`workflow.multica-half-auto.yaml` + `prompts_multica-half-auto/` is the gate
+version (investigate → research-review → implement → implementation-review →
+code-review → done), mirroring `linear-half-auto`. Dry-run with:
+
+```bash
+cp workflow.multica-half-auto.yaml workflow.yaml
+cp prompts_multica-half-auto/*.md prompts/
+stokowski workflow.yaml --dry-run
+```
+
+Unit tests (`tests/test_multica_tracker.py`) exercise the adapter against a
+fake `multica` CLI (`tests/fake_multica.py`): the six interface methods, the
+gate approve/rework decision, and rework counting.
+
 ## Configuration reference
 
 <details>
@@ -464,9 +558,9 @@ Open `http://localhost:4200` for the live dashboard.
 
 ```yaml
 tracker:
-  kind: linear                          # only "linear" supported
-  project_slug: "abc123def456"          # hex slugId from your Linear project URL
-  api_key: "lin_api_your_key_here"      # your Linear API key — agents inherit this
+  kind: linear                          # "linear", "local", or "multica"
+  project_slug: "abc123def456"          # Linear slugId, or Multica project ID
+  api_key: "lin_api_your_key_here"      # Linear only — agents inherit this
 
 # These map Stokowski's internal lifecycle roles to your Linear state names.
 # You can rename values to match your team's Linear setup (e.g. todo: "Ready"),
