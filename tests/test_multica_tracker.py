@@ -160,6 +160,8 @@ def test_fetch_candidate_issues(fake_bin, state_file):
             issue(id="b", identifier="WEI-2", status="in_progress"),
             issue(id="c", identifier="WEI-3", status="done"),
             issue(id="d", identifier="WEI-4", status="cancelled"),
+            # sub-issue (has a parent) must NOT be a candidate
+            issue(id="e", identifier="WEI-5", status="todo", parent_issue_id="a"),
         ],
     )
     tracker = make_tracker(fake_bin, state_file)

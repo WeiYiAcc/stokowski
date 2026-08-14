@@ -467,13 +467,22 @@ class MulticaTracker:
         return None
 
     async def _list_issues(self, states: list[str]) -> list[Issue]:
-        """List issues for each requested status and merge the results."""
+        """List issues for each requested status and merge the results.
+
+        Sub-issues (issues with a parent) are excluded — they are stage-execution
+        records the orchestrator creates itself, not top-level workflow
+        candidates. Without this filter the orchestrator re-picks its own stage
+        sub-issues (they sit in ``todo`` in the same project) and spawns a
+        runaway tree of sub-sub-issues.
+        """
         seen: dict[str, Issue] = {}
         for raw_state in states or []:
             status = map_state(raw_state)
             if not status:
                 continue
             for node in await self._page_issues(status):
+                if node.get("parent_issue_id"):
+                    continue
                 try:
                     issue = normalize_issue(node)
                 except (KeyError, TypeError) as e:
