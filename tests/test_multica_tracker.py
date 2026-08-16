@@ -283,6 +283,196 @@ def test_wait_for_issue_done(fake_bin, state_file):
     assert run(tracker.wait_for_issue_done("td-1", timeout_ms=0)) == "timeout"
 
 
+def test_find_stage_subissue_returns_active_matching_stage(fake_bin, state_file):
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            # finished sub-issues for stage 1 -> not reusable
+            issue(id="sub-1", identifier="WEI-101", status="done",
+                  parent_issue_id="iss-1", stage=1),
+            # in-flight sub-issue for stage 1 -> reusable
+            issue(id="sub-2", identifier="WEI-102", status="in_progress",
+                  parent_issue_id="iss-1", stage=1),
+            # in-flight but a different stage -> not this stage
+            issue(id="sub-3", identifier="WEI-103", status="todo",
+                  parent_issue_id="iss-1", stage=2),
+        ],
+    )
+    tracker = make_tracker(fake_bin, state_file)
+    found = run(
+        tracker.find_stage_subissue(
+            parent_id="iss-1",
+            parent_identifier="WEI-1",
+            state_name="investigate",
+            stage=1,
+        )
+    )
+    assert found is not None
+    assert found.id == "sub-2"
+
+
+def test_find_stage_subissue_none_when_all_finished(fake_bin, state_file):
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            issue(id="sub-1", identifier="WEI-101", status="done",
+                  parent_issue_id="iss-1", stage=1),
+            issue(id="sub-2", identifier="WEI-102", status="cancelled",
+                  parent_issue_id="iss-1", stage=1),
+            issue(id="sub-3", identifier="WEI-103", status="blocked",
+                  parent_issue_id="iss-1", stage=1),
+        ],
+    )
+    tracker = make_tracker(fake_bin, state_file)
+    found = run(
+        tracker.find_stage_subissue(
+            parent_id="iss-1",
+            parent_identifier="WEI-1",
+            state_name="investigate",
+            stage=1,
+        )
+    )
+    assert found is None
+
+
+def test_find_stage_subissue_matches_unstaged_by_title_prefix(fake_bin, state_file):
+    # Legacy/unstaged sub-issues (stage=None) fall back to the title prefix
+    # "[<parent identifier>] <state_name>:".
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            issue(id="sub-1", identifier="WEI-101", status="todo",
+                  parent_issue_id="iss-1",
+                  title="[WEI-1] implement: T"),
+        ],
+    )
+    tracker = make_tracker(fake_bin, state_file)
+    found = run(
+        tracker.find_stage_subissue(
+            parent_id="iss-1",
+            parent_identifier="WEI-1",
+            state_name="implement",
+            stage=2,
+        )
+    )
+    assert found is not None
+    assert found.id == "sub-1"
+
+
+def test_find_stage_subissue_ignores_other_parents(fake_bin, state_file):
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            # in-flight, same stage ordinal + prefix, but under a different parent
+            issue(id="sub-1", identifier="WEI-101", status="in_progress",
+                  parent_issue_id="other-parent", stage=1,
+                  title="[WEI-1] investigate: T"),
+        ],
+    )
+    tracker = make_tracker(fake_bin, state_file)
+    found = run(
+        tracker.find_stage_subissue(
+            parent_id="iss-1",
+            parent_identifier="WEI-1",
+            state_name="investigate",
+            stage=1,
+        )
+    )
+    assert found is None
+
+
+# ── Idempotency guard: driver restart must not duplicate stage sub-issues ─────
+
+
+def _stage_orchestrator(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    orch = _gate_orchestrator(wf)
+    orch._issue_state_runs = {"iss-1": 1}
+    orch._last_issues = {
+        "iss-1": Issue(id="iss-1", identifier="WEI-1", title="T", state="in_progress")
+    }
+    attempt = RunAttempt(issue_id="iss-1", issue_identifier="WEI-1", state_name="investigate")
+    state_cfg = orch.cfg.states["investigate"]
+    claude_cfg = ClaudeConfig(turn_timeout_ms=10_000)
+    ws = SimpleNamespace(path=str(tmp_path / "ws"))
+    return orch, attempt, state_cfg, claude_cfg, ws
+
+
+def test_multica_run_stage_reuses_existing_subissue(tmp_path, fake_bin, state_file):
+    # The WEI-423/WEI-424 regression: after a driver restart, a stage whose
+    # previous sub-issue is still in flight must reuse it, not spawn a
+    # duplicate. Reuse must also wait for the existing sub-issue to finish.
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            issue(id="sub-100", identifier="WEI-101", status="in_progress",
+                  parent_issue_id="iss-1", stage=1,
+                  title="[WEI-1] investigate: T"),
+        ],
+        auto_done_after={"sub-100": 1},
+    )
+    orch, attempt, state_cfg, claude_cfg, ws = _stage_orchestrator(
+        tmp_path, fake_bin, state_file
+    )
+
+    result = run(
+        orch._run_multica_stage(
+            issue=orch._last_issues["iss-1"],
+            attempt=attempt,
+            state_name="investigate",
+            state_cfg=state_cfg,
+            claude_cfg=claude_cfg,
+            prompt="Do the investigation.",
+            ws=ws,
+        )
+    )
+    assert result.status == "succeeded"
+    assert result.session_id == "sub-100"
+    data = read_state(state_file)
+    # no new sub-issue was created
+    assert len(data["issues"]) == 2
+    assert not any(line.startswith("create ") for line in data["log"])
+
+
+def test_multica_run_stage_creates_new_when_none_in_flight(tmp_path, fake_bin, state_file):
+    # Normal path unchanged: no in-flight sub-issue -> create + poll.
+    seed(
+        state_file,
+        issues=[
+            issue(id="iss-1", status="in_progress"),
+            # previous run's sub-issue is already done -> create a fresh one
+            issue(id="sub-200", identifier="WEI-101", status="done",
+                  parent_issue_id="iss-1", stage=1,
+                  title="[WEI-1] investigate: T"),
+        ],
+        auto_done_after={"sub-100": 1},
+    )
+    orch, attempt, state_cfg, claude_cfg, ws = _stage_orchestrator(
+        tmp_path, fake_bin, state_file
+    )
+
+    result = run(
+        orch._run_multica_stage(
+            issue=orch._last_issues["iss-1"],
+            attempt=attempt,
+            state_name="investigate",
+            state_cfg=state_cfg,
+            claude_cfg=claude_cfg,
+            prompt="Do the investigation.",
+            ws=ws,
+        )
+    )
+    assert result.status == "succeeded"
+    assert result.session_id == "sub-100"
+    data = read_state(state_file)
+    assert any(line.startswith("create sub-100") for line in data["log"])
+
+
 # ── Orchestrator-level: gate protocol + rework counting ───────────────────────
 
 def _write_workflow(tmp_path, fake_bin: str) -> str:

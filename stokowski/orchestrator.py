@@ -904,22 +904,50 @@ class Orchestrator:
         attempt.turn_count += 1
         attempt.last_event_at = datetime.now(timezone.utc)
 
+        # Idempotency guard: a driver restart resumes the state machine from the
+        # parent issue's tracking comments and can re-enter a stage whose
+        # previous sub-issue is still in flight. Reuse it instead of spawning a
+        # duplicate stage sub-issue (the WEI-423/WEI-424 regression).
         try:
-            sub_id = await tracker.create_agent_issue(
-                title=title,
-                description=description,
+            existing = await tracker.find_stage_subissue(
                 parent_id=issue.id,
-                assignee=assignee,
+                parent_identifier=issue.identifier,
+                state_name=state_name,
                 stage=stage,
             )
         except Exception as e:
+            # Fail closed: on an uncertain lookup, do not risk a duplicate spawn.
             attempt.status = "failed"
-            attempt.error = f"Failed to create stage sub-issue: {e}"
+            attempt.error = f"Failed to check for existing stage sub-issue: {e}"
             logger.error(
-                "Stage sub-issue create failed issue=%s stage=%s: %s",
+                "Stage sub-issue dedup check failed issue=%s stage=%s: %s",
                 issue.identifier, state_name, e,
             )
             return attempt
+
+        if existing is not None:
+            sub_id = existing.id
+            logger.info(
+                "Reusing existing stage sub-issue %s for %s stage %s",
+                sub_id, issue.identifier, state_name,
+            )
+        else:
+            try:
+                sub_id = await tracker.create_agent_issue(
+                    title=title,
+                    description=description,
+                    parent_id=issue.id,
+                    assignee=assignee,
+                    stage=stage,
+                )
+            except Exception as e:
+                attempt.status = "failed"
+                attempt.error = f"Failed to create stage sub-issue: {e}"
+                logger.error(
+                    "Stage sub-issue create failed issue=%s stage=%s: %s",
+                    issue.identifier, state_name, e,
+                )
+                return attempt
 
         attempt.session_id = sub_id
         attempt.last_message = f"stage sub-issue {sub_id} (run {run})"

@@ -115,6 +115,32 @@ def main(argv):
             "total": len(issues),
         })
 
+    if sub == "children":
+        parent_id = rest[0]
+        by_stage = {}
+        unstaged = []
+        for issue in state["issues"]:
+            if issue.get("parent_issue_id") != parent_id:
+                continue
+            stage = issue.get("stage")
+            if stage is None:
+                unstaged.append(issue)
+            else:
+                by_stage.setdefault(stage, []).append(issue)
+        stages = []
+        for stage in sorted(by_stage):
+            items = by_stage[stage]
+            stages.append({
+                "stage": stage,
+                "total": len(items),
+                "done": sum(
+                    1 for i in items if i.get("status") in ("done", "cancelled")
+                ),
+                "issues": items,
+            })
+        out({"stages": stages, "total": len(stages) + len(unstaged),
+             "unstaged": unstaged})
+
     if sub == "get":
         issue_id = rest[0]
         issue = find_issue(state, issue_id)

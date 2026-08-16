@@ -54,6 +54,12 @@ MULTICA_STATUSES = {
 # review actually happens.
 TERMINAL_STATUSES = {"done", "cancelled", "closed", "in_review"}
 
+# Statuses treated as "stage still in flight" for the idempotency guard. A stage
+# sub-issue in any of these is reused on a driver restart instead of spawning a
+# duplicate; done/cancelled/blocked/backlog are not (blocked is terminal for the
+# purpose of re-dispatch, and backlog means the stage was not really started).
+ACTIVE_STATUSES = {"todo", "in_progress", "in_review"}
+
 # Alias map from Linear/logical state names to Multica statuses.
 _STATE_ALIASES = {
     "todo": "todo",
@@ -427,6 +433,68 @@ class MulticaTracker:
             )
         logger.info("Created stage sub-issue %s for parent %s", issue_id, parent_id)
         return str(issue_id)
+
+    async def find_stage_subissue(
+        self,
+        *,
+        parent_id: str,
+        parent_identifier: str = "",
+        state_name: str = "",
+        stage: int | None = None,
+    ) -> Issue | None:
+        """Return an existing, unfinished stage sub-issue under a parent, or None.
+
+        The idempotency guard for ``create_agent_issue``: a driver restart
+        resumes the state machine from the parent issue's tracking comments and
+        can reach a stage whose previous sub-issue is still in flight, which
+        would otherwise spawn a duplicate (WEI-423/WEI-424). Matching is by
+        stage ordinal (the ``--stage N`` grouping the ``children`` command
+        returns) with a fallback to the title prefix
+        ``[{parent_identifier}] {state_name}:`` for unstaged sub-issues. Only
+        sub-issues still in flight (todo/in_progress/in_review) count — a
+        finished or cancelled one means the stage is done, not pending.
+        """
+        try:
+            data = await asyncio.to_thread(
+                self._run_cli,
+                ["issue", "children", parent_id, "--output", "json"],
+                None,
+                60,
+            )
+        except Exception as e:
+            logger.error("Failed to list children of %s: %s", parent_id, e)
+            raise RuntimeError(
+                f"Failed to list stage sub-issues of {parent_id}: {e}"
+            ) from None
+        if not isinstance(data, dict):
+            return None
+
+        candidates: list[dict] = []
+        for group in data.get("stages") or []:
+            if isinstance(group, dict):
+                candidates.extend(group.get("issues") or [])
+        candidates.extend(data.get("unstaged") or [])
+
+        prefix = (
+            f"[{parent_identifier}] {state_name}:"
+            if parent_identifier and state_name
+            else ""
+        )
+        for node in candidates:
+            if not isinstance(node, dict):
+                continue
+            if map_state(node.get("status", "")) not in ACTIVE_STATUSES:
+                continue
+            node_stage = node.get("stage")
+            if node_stage is not None:
+                try:
+                    if int(node_stage) == int(stage):
+                        return normalize_issue(node)
+                except (TypeError, ValueError):
+                    pass
+            if prefix and str(node.get("title", "")).startswith(prefix):
+                return normalize_issue(node)
+        return None
 
     async def wait_for_issue_done(
         self,
