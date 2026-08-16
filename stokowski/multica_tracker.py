@@ -407,6 +407,37 @@ class MulticaTracker:
             logger.error("Failed to write metadata %s on %s: %s", key, issue_id, e)
             return False
 
+    async def get_issue_metadata(self, issue_id: str) -> dict[str, str]:
+        """Read all metadata keys for an issue.
+
+        Uses ``multica issue metadata list``. Returns a flat dict of string
+        key/value pairs (non-string values are coerced to str). On failure,
+        returns an empty dict so that metadata reconstruction is best-effort.
+        """
+        try:
+            data = await asyncio.to_thread(
+                self._run_cli,
+                ["issue", "metadata", "list", issue_id, "--output", "json"],
+            )
+        except Exception as e:
+            logger.warning("Failed to read metadata for %s: %s", issue_id, e)
+            return {}
+
+        if not isinstance(data, dict):
+            return {}
+
+        result: dict[str, str] = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                # Some backends may nest {value, type}; unwrap the payload.
+                raw = value.get("value")
+                if raw is None:
+                    continue
+                result[key] = str(raw)
+            else:
+                result[key] = str(value)
+        return result
+
     async def close(self):
         """No-op — the CLI is invoked per call, there is no connection to close."""
 

@@ -235,6 +235,9 @@ def main(argv):
             state.setdefault("metadata", {}).get(issue_id, {}).pop(key, None)
             save(state)
             out({})
+        elif meta_sub == "list":
+            issue_id = rest[0]
+            out(state.get("metadata", {}).get(issue_id, {}))
         else:
             err(f"fake multica: unknown metadata subcommand {meta_sub}")
 

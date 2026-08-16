@@ -849,3 +849,157 @@ states:
     workflow = parse_workflow_file(str(wf))
     errors = validate_config(workflow.config)
     assert any("project_id" in e for e in errors)
+
+
+# ── Library API: tick_once / advance ──────────────────────────────────────────
+
+
+def test_get_issue_metadata(fake_bin, state_file):
+    seed(
+        state_file,
+        issues=[issue(id="a")],
+        metadata={"a": {"gate.research-review": "approved", "foo": "bar"}},
+    )
+    tracker = make_tracker(fake_bin, state_file)
+    data = run(tracker.get_issue_metadata("a"))
+    assert data == {"gate.research-review": "approved", "foo": "bar"}
+
+
+def test_get_issue_metadata_missing_returns_empty(fake_bin, state_file):
+    seed(state_file, issues=[issue(id="a")])
+    tracker = make_tracker(fake_bin, state_file)
+    assert run(tracker.get_issue_metadata("a")) == {}
+
+
+def test_tick_once_dispatches_eligible_issue(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    seed(
+        state_file,
+        issues=[issue(id="iss-1", status="in_progress")],
+        auto_done_after={"sub-100": 1},
+    )
+    orch = _gate_orchestrator(wf)
+
+    async def _run():
+        summary = await orch.tick_once()
+        # Wait for the background _run_worker to finish polling the sub-issue.
+        for _ in range(200):
+            if not orch.running:
+                break
+            await asyncio.sleep(0.01)
+        return summary
+
+    summary = run(_run())
+    assert "iss-1" in summary["dispatched"]
+    data = read_state(state_file)
+    assert any(line.startswith("create sub-100") for line in data["log"])
+
+
+def test_advance_agent_state_creates_subissue_and_moves_to_gate(
+    tmp_path, fake_bin, state_file
+):
+    wf = _write_workflow(tmp_path, fake_bin)
+    seed(
+        state_file,
+        issues=[issue(id="iss-1", status="in_progress")],
+        auto_done_after={"sub-100": 1},
+    )
+    orch = _gate_orchestrator(wf)
+
+    result = run(orch.advance("iss-1"))
+
+    assert result["action"] == "run_stage"
+    assert result["state"] == "investigate"
+    assert result["status"] == "succeeded"
+    data = read_state(state_file)
+    assert data["issues"][-1]["parent_issue_id"] == "iss-1"
+    assert data["issues"][0]["status"] == "in_review"
+    assert orch._issue_current_state["iss-1"] == "gate"
+
+
+def test_advance_gate_state_enters_gate(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    # A state-tracking marker at the gate (not a waiting gate marker) means the
+    # gate has been reached but not yet entered.
+    ts = "2026-08-14T10:00:00+00:00"
+    payload = json.dumps({"state": "gate", "run": 1, "timestamp": ts})
+    comments = [
+        {
+            "id": "s1",
+            "content": f"<!-- stokowski:state {payload} -->\n\nReached gate",
+            "created_at": ts,
+            "author_type": "agent",
+        }
+    ]
+    seed(state_file, issues=[issue(id="iss-1", status="in_progress")], comments={"iss-1": comments})
+    orch = _gate_orchestrator(wf)
+
+    result = run(orch.advance("iss-1"))
+
+    assert result["action"] == "enter_gate"
+    assert result["state"] == "gate"
+    data = read_state(state_file)
+    assert data["issues"][0]["status"] == "in_review"
+    bodies = [c["content"] for c in data["comments"]["iss-1"]]
+    assert any('"status": "waiting"' in b for b in bodies)
+
+
+def test_advance_responds_to_metadata_approval(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    gate_ts = "2026-08-14T10:00:00+00:00"
+    payload = json.dumps(
+        {"state": "gate", "status": "waiting", "run": 1, "timestamp": gate_ts}
+    )
+    comments = [
+        {
+            "id": "g1",
+            "content": f"<!-- stokowski:gate {payload} -->\n\nAwaiting review",
+            "created_at": gate_ts,
+            "author_type": "agent",
+        }
+    ]
+    seed(
+        state_file,
+        issues=[issue(id="iss-1", status="in_review")],
+        comments={"iss-1": comments},
+        metadata={"iss-1": {"gate.gate": "approved"}},
+    )
+    orch = _gate_orchestrator(wf)
+
+    result = run(orch.advance("iss-1"))
+
+    assert result["action"] == "check_gate"
+    data = read_state(state_file)
+    assert data["issues"][0]["status"] == "done"
+    bodies = [c["content"] for c in data["comments"]["iss-1"]]
+    assert any('"status": "approved"' in b for b in bodies)
+
+
+def test_reconstruct_state_from_metadata_rework(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    gate_ts = "2026-08-14T10:00:00+00:00"
+    payload = json.dumps(
+        {"state": "gate", "status": "waiting", "run": 1, "timestamp": gate_ts}
+    )
+    comments = [
+        {
+            "id": "g1",
+            "content": f"<!-- stokowski:gate {payload} -->\n\nAwaiting review",
+            "created_at": gate_ts,
+            "author_type": "agent",
+        }
+    ]
+    seed(
+        state_file,
+        issues=[issue(id="iss-1", status="in_review")],
+        comments={"iss-1": comments},
+        metadata={"iss-1": {"gate.gate": "rework"}},
+    )
+    orch = _gate_orchestrator(wf)
+
+    state_name, run_number = run(
+        orch._reconstruct_state(normalize_issue(issue(id="iss-1", status="in_review")))
+    )
+
+    assert state_name == "investigate"
+    assert run_number == 2

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import signal
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,12 +45,10 @@ class Orchestrator:
         self.total_seconds_running: float = 0
 
         # Internal
-        self._tracker: Any = None  # LinearClient or LocalTracker
-        self._linear: LinearClient | None = None  # kept for compatibility
+        self._tracker: Any = None  # MulticaTracker only in this build
         self._tasks: dict[str, asyncio.Task] = {}
         self._retry_timers: dict[str, asyncio.TimerHandle] = {}
-        self._child_pids: set[int] = set()  # Track claude subprocess PIDs
-        self._last_session_ids: dict[str, str] = {}  # issue_id -> last known session_id
+        self._last_session_ids: dict[str, str] = {}  # issue_id -> last known stage sub-issue id
         self._jinja = Environment(undefined=StrictUndefined)
         self._running = False
         self._last_issues: dict[str, Issue] = {}
@@ -136,21 +132,10 @@ class Orchestrator:
                 pass  # Normal poll interval elapsed
 
     async def stop(self):
-        """Stop the orchestration loop and kill all running agents."""
+        """Stop the orchestration loop and cancel all running stage polls."""
         self._running = False
         if hasattr(self, '_stop_event'):
             self._stop_event.set()
-
-        # Kill all child claude processes first
-        for pid in list(self._child_pids):
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
-        self._child_pids.clear()
 
         # Cancel async tasks
         for issue_id, task in list(self._tasks.items()):
@@ -160,84 +145,102 @@ class Orchestrator:
             await asyncio.sleep(0.5)
         self._tasks.clear()
 
-        if self._linear:
-            await self._linear.close()
-
     async def _startup_cleanup(self):
         """No-op: workspace lifecycle is managed by the executing runner."""
         return
 
-    async def _resolve_current_state(self, issue: Issue) -> tuple[str, int]:
-        """Resolve current state machine state for an issue.
-        Returns (state_name, run).
-        """
-        # Check cache first
-        if issue.id in self._issue_current_state:
-            state_name = self._issue_current_state[issue.id]
-            run = self._issue_state_runs.get(issue.id, 1)
-            return state_name, run
+    async def _reconstruct_state(self, issue: Issue) -> tuple[str, int]:
+        """Reconstruct the internal state-machine state and run number for an
+        issue from its ``<!-- stokowski:* -->`` tracking comments and gate
+        metadata.
 
-        # Fetch comments from Linear and parse latest tracking
-        client = self._ensure_linear_client()
+        Gate metadata (``gate.<state>``) takes precedence over comment parsing
+        so that a driver restart can unambiguously reconstruct an
+        ``in_review`` issue whose human decision was already recorded (WEI-437).
+        """
+        client = self._ensure_tracker()
         comments = await client.fetch_comments(issue.id)
         tracking = parse_latest_tracking(comments)
+
+        metadata: dict[str, str] = {}
+        if hasattr(client, "get_issue_metadata"):
+            try:
+                metadata = await client.get_issue_metadata(issue.id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to read metadata for %s: %s", issue.identifier, e
+                )
 
         entry = self.cfg.entry_state
         if entry is None:
             raise RuntimeError("No entry state defined in config")
 
-        # No tracking → entry state, run 1
         if tracking is None:
-            self._issue_current_state[issue.id] = entry
-            self._issue_state_runs[issue.id] = 1
             return entry, 1
 
-        if tracking["type"] == "state":
-            state_name = tracking.get("state", entry)
-            run = tracking.get("run", 1)
-            if state_name in self.cfg.states:
-                self._issue_current_state[issue.id] = state_name
-                self._issue_state_runs[issue.id] = run
-                return state_name, run
-            # Unknown state → fallback to entry
-            self._issue_current_state[issue.id] = entry
-            self._issue_state_runs[issue.id] = 1
-            return entry, 1
-
-        if tracking["type"] == "gate":
+        if tracking.get("type") == "gate":
             gate_state = tracking.get("state", "")
             status = tracking.get("status", "")
             run = tracking.get("run", 1)
 
-            if status == "waiting":
-                if gate_state in self.cfg.states:
-                    self._issue_current_state[issue.id] = gate_state
-                    self._issue_state_runs[issue.id] = run
-                    self._pending_gates[issue.id] = gate_state
-                    return gate_state, run
-
-            elif status == "approved":
+            # Metadata is authoritative for completed gate decisions.
+            meta_key = f"gate.{gate_state}"
+            meta_status = metadata.get(meta_key)
+            if meta_status == "approved":
                 gate_cfg = self.cfg.states.get(gate_state)
                 if gate_cfg and "approve" in gate_cfg.transitions:
-                    target = gate_cfg.transitions["approve"]
-                    self._issue_current_state[issue.id] = target
-                    self._issue_state_runs[issue.id] = run
-                    return target, run
-
-            elif status == "rework":
+                    return gate_cfg.transitions["approve"], run
+                return entry, 1
+            if meta_status == "rework":
                 gate_cfg = self.cfg.states.get(gate_state)
-                rework_to = tracking.get("rework_to", "")
+                rework_to = tracking.get("rework_to") or ""
                 if not rework_to and gate_cfg:
                     rework_to = gate_cfg.rework_to or ""
                 if rework_to and rework_to in self.cfg.states:
-                    self._issue_current_state[issue.id] = rework_to
-                    self._issue_state_runs[issue.id] = run
-                    return rework_to, run
+                    return rework_to, run + 1
+                return entry, 1
 
-        # Fallback to entry state
-        self._issue_current_state[issue.id] = entry
-        self._issue_state_runs[issue.id] = 1
+            if status == "waiting":
+                if gate_state in self.cfg.states:
+                    return gate_state, run
+                return entry, 1
+            if status == "approved":
+                gate_cfg = self.cfg.states.get(gate_state)
+                if gate_cfg and "approve" in gate_cfg.transitions:
+                    return gate_cfg.transitions["approve"], run
+                return entry, 1
+            if status == "rework":
+                gate_cfg = self.cfg.states.get(gate_state)
+                rework_to = tracking.get("rework_to") or ""
+                if not rework_to and gate_cfg:
+                    rework_to = gate_cfg.rework_to or ""
+                if rework_to and rework_to in self.cfg.states:
+                    return rework_to, run + 1
+                return entry, 1
+
+            return entry, 1
+
+        if tracking.get("type") == "state":
+            state_name = tracking.get("state", "")
+            run = tracking.get("run", 1)
+            if state_name in self.cfg.states:
+                return state_name, run
+
         return entry, 1
+
+    async def _resolve_current_state(self, issue: Issue) -> tuple[str, int]:
+        """Resolve current state machine state for an issue (cache-aware).
+        Returns (state_name, run).
+        """
+        if issue.id in self._issue_current_state:
+            state_name = self._issue_current_state[issue.id]
+            run = self._issue_state_runs.get(issue.id, 1)
+            return state_name, run
+
+        state_name, run = await self._reconstruct_state(issue)
+        self._issue_current_state[issue.id] = state_name
+        self._issue_state_runs[issue.id] = run
+        return state_name, run
 
     async def _safe_enter_gate(self, issue: Issue, state_name: str):
         """Wrapper around _enter_gate that logs errors."""
@@ -511,9 +514,24 @@ class Orchestrator:
                 )
 
     async def _tick(self):
-        """Single poll tick: reconcile, validate, fetch, dispatch."""
+        """Internal backward-compatible tick wrapper."""
+        await self.tick_once()
+
+    async def tick_once(self) -> dict[str, Any]:
+        """Single event-driven tick without sleeping.
+
+        Reconciles running workers, handles gate responses, fetches candidate
+        issues, reconstructs their state machine state, and dispatches eligible
+        ones. Returns a summary of actions taken.
+        """
         # Reload workflow (supports hot-reload)
         errors = self._load_workflow()
+
+        summary: dict[str, Any] = {
+            "dispatched": [],
+            "gates_handled": [],
+            "errors": [],
+        }
 
         # Part 1: Reconcile running issues
         await self._reconcile()
@@ -523,8 +541,9 @@ class Orchestrator:
 
         # Part 2: Validate config
         if errors:
-            logger.warning(f"Config invalid, skipping dispatch: {errors}")
-            return
+            summary["errors"].extend(errors)
+            logger.warning("Config invalid, skipping dispatch: %s", errors)
+            return summary
 
         # Part 3: Fetch candidates
         try:
@@ -534,8 +553,9 @@ class Orchestrator:
                 self.cfg.active_linear_states(),
             )
         except Exception as e:
-            logger.error(f"Failed to fetch candidates: {e}")
-            return
+            logger.error("Failed to fetch candidates: %s", e)
+            summary["errors"].append(str(e))
+            return summary
 
         # Cache issues for retry lookup
         for issue in candidates:
@@ -556,7 +576,9 @@ class Orchestrator:
                 try:
                     await self._resolve_current_state(issue)
                 except Exception as e:
-                    logger.warning(f"Failed to resolve state for {issue.identifier}: {e}")
+                    logger.warning(
+                        "Failed to resolve state for %s: %s", issue.identifier, e
+                    )
 
         # Part 5: Dispatch
         available_slots = max(
@@ -576,14 +598,132 @@ class Orchestrator:
                 state_count = sum(
                     1
                     for r in self.running.values()
-                    if self._last_issues.get(r.issue_id, Issue(id="", identifier="", title="")).state.strip().lower()
+                    if self._last_issues.get(
+                        r.issue_id, Issue(id="", identifier="", title="")
+                    ).state.strip().lower()
                     == state_key
                 )
                 if state_count >= state_limit:
                     continue
 
             self._dispatch(issue)
+            summary["dispatched"].append(issue.id)
             available_slots -= 1
+
+        return summary
+
+    async def advance(self, issue_id: str) -> dict[str, Any]:
+        """Advance a specific issue by one state-machine step.
+
+        Fetches the issue, reconstructs its internal state from tracking
+        comments and gate metadata, then performs the next action:
+
+        - terminal state: no-op
+        - gate state: enter the gate (if not pending) or process a pending response
+        - agent state: run the stage via a Multica sub-issue and transition on completion
+
+        Returns a dict describing the action taken.
+        """
+        errors = self._load_workflow()
+        if errors:
+            raise RuntimeError(f"Startup validation failed: {errors}")
+
+        client = self._ensure_tracker()
+        issue = await client.get_issue(issue_id)
+        self._last_issues[issue.id] = issue
+
+        # If the latest tracking marker is a waiting gate, process its response
+        # (using metadata as authoritative) before falling back to general state
+        # reconstruction. This ensures a restart after a metadata write still
+        # executes the approve/rework transition.
+        comments = await client.fetch_comments(issue_id)
+        tracking = parse_latest_tracking(comments)
+        if (
+            tracking
+            and tracking.get("type") == "gate"
+            and tracking.get("status") == "waiting"
+        ):
+            gate_state = tracking.get("state", "")
+            gate_cfg = self.cfg.states.get(gate_state)
+            if gate_cfg and gate_cfg.type == "gate":
+                run = tracking.get("run", 1)
+                self._issue_current_state[issue.id] = gate_state
+                self._issue_state_runs[issue.id] = run
+                self._pending_gates[issue.id] = gate_state
+                await self._handle_multica_gate_response_for(issue.id)
+                return {
+                    "issue_id": issue_id,
+                    "action": "check_gate",
+                    "state": gate_state,
+                    "run": self._issue_state_runs.get(issue.id, run),
+                }
+
+        # Force a fresh state resolution (ignore any stale in-memory cache).
+        self._issue_current_state.pop(issue.id, None)
+        self._issue_state_runs.pop(issue.id, None)
+
+        state_name, run = await self._resolve_current_state(issue)
+        state_cfg = self.cfg.states.get(state_name)
+        if not state_cfg:
+            return {
+                "issue_id": issue_id,
+                "action": "none",
+                "reason": f"unknown state '{state_name}'",
+            }
+
+        if state_cfg.type == "terminal":
+            return {
+                "issue_id": issue_id,
+                "action": "none",
+                "state": state_name,
+                "reason": "terminal state",
+            }
+
+        if state_cfg.type == "gate":
+            if issue.id not in self._pending_gates:
+                await self._enter_gate(issue, state_name)
+                return {
+                    "issue_id": issue_id,
+                    "action": "enter_gate",
+                    "state": state_name,
+                    "run": run,
+                }
+            # Already pending — process metadata/comment-driven response.
+            await self._handle_multica_gate_response_for(issue.id)
+            return {
+                "issue_id": issue_id,
+                "action": "check_gate",
+                "state": state_name,
+                "run": self._issue_state_runs.get(issue.id, run),
+            }
+
+        # Agent state
+        if issue.id in self.running:
+            return {
+                "issue_id": issue_id,
+                "action": "none",
+                "reason": "already running",
+            }
+
+        self.claimed.add(issue.id)
+        attempt = RunAttempt(
+            issue_id=issue.id,
+            issue_identifier=issue.identifier,
+            attempt=1,
+            state_name=state_name,
+        )
+        self.running[issue.id] = attempt
+        await self._run_worker(issue, attempt)
+
+        return {
+            "issue_id": issue_id,
+            "action": "run_stage",
+            "state": state_name,
+            "run": run,
+            "status": attempt.status,
+            "session_id": attempt.session_id,
+            "error": attempt.error,
+        }
 
     def _is_eligible(self, issue: Issue) -> bool:
         """Check if an issue is eligible for dispatch."""
@@ -655,16 +795,90 @@ class Orchestrator:
         task = asyncio.create_task(self._run_worker(issue, attempt))
         self._tasks[issue.id] = task
 
-        runner = state_cfg.runner if state_cfg else "claude"
         logger.info(
             f"Dispatched issue={issue.identifier} "
             f"state={issue.state} "
             f"machine_state={state_name or 'entry'} "
-            f"runner={runner} "
-            f"session={'fresh' if use_fresh_session else 'inherit'} "
+            f"channel=multica "
             f"attempt={attempt_num}"
         )
 
+    async def _run_worker(self, issue: Issue, attempt: RunAttempt):
+        """Run one agent stage via a Multica sub-issue and transition on completion.
+
+        This is the multica-only replacement for the archived local CLI runner.
+        It renders the stage prompt, creates/polls a Multica stage sub-issue,
+        and follows the ``complete`` transition when the stage succeeds.
+        """
+        state_name = attempt.state_name or self.cfg.entry_state
+        state_cfg = self.cfg.states.get(state_name) if state_name else None
+        claude_cfg = (
+            merge_state_config(state_cfg, self.cfg.claude)
+            if state_cfg
+            else self.cfg.claude
+        )
+
+        attempt.status = "streaming"
+        attempt.started_at = attempt.started_at or datetime.now(timezone.utc)
+
+        try:
+            prompt = await self._render_prompt_async(
+                issue, attempt.attempt, state_name
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to render prompt for %s: %s", issue.identifier, e
+            )
+            attempt.status = "failed"
+            attempt.error = f"prompt render failed: {e}"
+            self._schedule_retry(
+                issue, attempt_num=(attempt.attempt or 0) + 1, delay_ms=60_000
+            )
+            return
+
+        # Multica-only mode: no local workspace, runner CLI, or child PID tracking.
+        ws = None
+
+        try:
+            result = await self._run_multica_stage(
+                issue=issue,
+                attempt=attempt,
+                state_name=state_name,
+                state_cfg=state_cfg,
+                claude_cfg=claude_cfg,
+                prompt=prompt,
+                ws=ws,
+            )
+        except Exception as e:
+            logger.error(
+                "Stage failed for %s: %s", issue.identifier, e, exc_info=True
+            )
+            attempt.status = "failed"
+            attempt.error = f"stage exception: {e}"
+            self._schedule_retry(
+                issue, attempt_num=(attempt.attempt or 0) + 1, delay_ms=60_000
+            )
+            return
+
+        self.total_input_tokens += result.input_tokens
+        self.total_output_tokens += result.output_tokens
+        self.total_tokens += result.total_tokens
+
+        if result.status == "succeeded":
+            attempt.status = "succeeded"
+            attempt.completed_at = datetime.now(timezone.utc)
+            self._last_completed_at[issue.id] = attempt.completed_at
+            self._last_session_ids[issue.id] = result.session_id
+            self.running.pop(issue.id, None)
+            self._tasks.pop(issue.id, None)
+            self.claimed.discard(issue.id)
+            await self._safe_transition(issue, "complete")
+        else:
+            attempt.status = "failed"
+            attempt.error = result.error or "stage failed"
+            self._schedule_retry(
+                issue, attempt_num=(attempt.attempt or 0) + 1, delay_ms=60_000
+            )
 
     async def _run_multica_stage(
         self,
@@ -818,123 +1032,144 @@ class Orchestrator:
             f"explain why."
         )
 
-    async def _handle_multica_gate_responses(self):
-        """Comment-driven gate protocol for the multica tracker.
+    async def _handle_multica_gate_response_for(self, issue_id: str):
+        """Process a gate response for a single issue (Multica protocol).
 
-        A gate puts the issue in ``in_review`` (the review state). A human
-        decides by commenting ``approve`` or ``rework`` on the issue; only
-        comments newer than the current gate's waiting comment count. Rework
-        returns to ``rework_to`` and counts against ``max_rework``; once the
-        limit is exceeded the issue stays in review and an escalated comment
-        is posted.
+        Gate metadata (``gate.<state>``) is authoritative when present;
+        otherwise the most recent human comment mentioning ``approve``/``rework``
+        decides. Rework increments the run counter and returns to ``rework_to``.
         """
         from .tracking import get_comments_since, parse_latest_tracking
         from .multica_tracker import MulticaTracker, evaluate_gate_decision
 
+        gate_state = self._pending_gates.get(issue_id)
+        if not gate_state:
+            return
+        gate_cfg = self.cfg.states.get(gate_state)
+        if not gate_cfg or gate_cfg.type != "gate":
+            return
+
         client = self._ensure_linear_client()
 
-        for issue_id in list(self._pending_gates):
-            gate_state = self._pending_gates.get(issue_id)
-            if not gate_state:
-                continue
-            gate_cfg = self.cfg.states.get(gate_state)
-            if not gate_cfg or gate_cfg.type != "gate":
-                continue
+        issue = self._last_issues.get(issue_id)
+        if issue is None:
+            issue = Issue(id=issue_id, identifier=issue_id, title="")
+            if isinstance(client, MulticaTracker):
+                try:
+                    issue = await client.get_issue(issue_id)
+                    self._last_issues[issue_id] = issue
+                except Exception as e:
+                    logger.warning("Failed to fetch gate issue %s: %s", issue_id, e)
 
-            issue = self._last_issues.get(issue_id)
-            if issue is None:
-                issue = Issue(id=issue_id, identifier=issue_id, title="")
-                if isinstance(client, MulticaTracker):
-                    try:
-                        issue = await client.get_issue(issue_id)
-                    except Exception as e:
-                        logger.warning("Failed to fetch gate issue %s: %s", issue_id, e)
+        try:
+            comments = await client.fetch_comments(issue_id)
+        except Exception as e:
+            logger.warning("Failed to fetch comments for gate issue %s: %s", issue_id, e)
+            return
 
+        tracking = parse_latest_tracking(comments)
+        if (
+            not tracking
+            or tracking.get("type") != "gate"
+            or tracking.get("state") != gate_state
+            or tracking.get("status") != "waiting"
+        ):
+            # Not the current waiting gate — leave it alone.
+            return
+
+        # Metadata is authoritative for completed gate decisions (WEI-437).
+        metadata: dict[str, str] = {}
+        if isinstance(client, MulticaTracker):
             try:
-                comments = await client.fetch_comments(issue_id)
+                metadata = await client.get_issue_metadata(issue_id)
             except Exception as e:
-                logger.warning("Failed to fetch comments for gate issue %s: %s", issue_id, e)
-                continue
+                logger.warning("Failed to read metadata for gate %s: %s", issue_id, e)
 
-            tracking = parse_latest_tracking(comments)
-            if (
-                not tracking
-                or tracking.get("type") != "gate"
-                or tracking.get("state") != gate_state
-                or tracking.get("status") != "waiting"
-            ):
-                # Not the current waiting gate — leave it alone.
-                continue
+        meta_key = f"gate.{gate_state}"
+        meta_status = metadata.get(meta_key)
 
-            since = tracking.get("timestamp")
-            recent = get_comments_since(comments, since)
-            decision = evaluate_gate_decision(recent)
-            run = self._issue_state_runs.get(issue_id, 1)
+        since = tracking.get("timestamp")
+        recent = get_comments_since(comments, since)
+        decision = evaluate_gate_decision(recent)
 
-            # Record the decision as structured issue metadata (gate.<state> =
-            # approved|rework) so an in_review issue carries an unambiguous,
-            # machine-readable outcome — not only comment keywords (WEI-434).
-            if decision in ("approve", "rework") and isinstance(client, MulticaTracker):
-                outcome = "approved" if decision == "approve" else "rework"
+        if meta_status == "approved":
+            decision = "approve"
+        elif meta_status == "rework":
+            decision = "rework"
+
+        run = self._issue_state_runs.get(issue_id, 1)
+
+        # Record the decision as structured issue metadata so an in_review issue
+        # carries an unambiguous, machine-readable outcome (WEI-434).
+        if decision in ("approve", "rework") and isinstance(client, MulticaTracker):
+            outcome = "approved" if decision == "approve" else "rework"
+            try:
                 await client.set_issue_metadata(
                     issue_id, f"gate.{gate_state}", outcome
                 )
+            except Exception as e:
+                logger.warning("Failed to write gate metadata for %s: %s", issue_id, e)
 
-            if decision == "approve":
-                self._pending_gates.pop(issue_id, None)
+        if decision == "approve":
+            self._pending_gates.pop(issue_id, None)
+            comment = make_gate_comment(
+                state=gate_state, status="approved", run=run
+            )
+            try:
+                await client.post_comment(issue_id, comment)
+            except Exception as e:
+                logger.warning("Failed to post approve comment: %s", e)
+            await self._transition(issue, "approve")
+            logger.info("Gate approved issue=%s gate=%s", issue.identifier, gate_state)
+
+        elif decision == "rework":
+            max_rework = gate_cfg.max_rework
+            if max_rework is not None and run >= max_rework:
                 comment = make_gate_comment(
-                    state=gate_state, status="approved", run=run
+                    state=gate_state, status="escalated", run=run
                 )
                 try:
                     await client.post_comment(issue_id, comment)
                 except Exception as e:
-                    logger.warning("Failed to post approve comment: %s", e)
-                await self._transition(issue, "approve")
-                logger.info("Gate approved issue=%s gate=%s", issue.identifier, gate_state)
-
-            elif decision == "rework":
-                max_rework = gate_cfg.max_rework
-                if max_rework is not None and run >= max_rework:
-                    comment = make_gate_comment(
-                        state=gate_state, status="escalated", run=run
-                    )
-                    try:
-                        await client.post_comment(issue_id, comment)
-                    except Exception as e:
-                        logger.warning("Failed to post escalated comment: %s", e)
-                    logger.warning(
-                        "Max rework exceeded issue=%s gate=%s run=%s max=%s",
-                        issue.identifier, gate_state, run, max_rework,
-                    )
-                    continue
-
-                rework_to = gate_cfg.rework_to
-                new_run = run + 1
-                self._pending_gates.pop(issue_id, None)
-                self._issue_current_state[issue_id] = rework_to
-                self._issue_state_runs[issue_id] = new_run
-
-                comment = make_gate_comment(
-                    state=gate_state, status="rework",
-                    rework_to=rework_to, run=new_run,
+                    logger.warning("Failed to post escalated comment: %s", e)
+                logger.warning(
+                    "Max rework exceeded issue=%s gate=%s run=%s max=%s",
+                    issue.identifier, gate_state, run, max_rework,
                 )
-                try:
-                    await client.post_comment(issue_id, comment)
-                except Exception as e:
-                    logger.warning("Failed to post rework comment: %s", e)
+                return
 
-                active_state = self.cfg.linear_states.active
-                moved = await client.update_issue_state(issue_id, active_state)
-                if not moved:
-                    logger.warning(
-                        "Failed to move %s to active after rework", issue.identifier
-                    )
-                self._last_issues[issue_id] = issue
-                self._schedule_retry(issue, attempt_num=0, delay_ms=1000)
-                logger.info(
-                    "Rework issue=%s gate=%s rework_to=%s run=%s",
-                    issue.identifier, gate_state, rework_to, new_run,
+            rework_to = gate_cfg.rework_to
+            new_run = run + 1
+            self._pending_gates.pop(issue_id, None)
+            self._issue_current_state[issue_id] = rework_to
+            self._issue_state_runs[issue_id] = new_run
+
+            comment = make_gate_comment(
+                state=gate_state, status="rework",
+                rework_to=rework_to, run=new_run,
+            )
+            try:
+                await client.post_comment(issue_id, comment)
+            except Exception as e:
+                logger.warning("Failed to post rework comment: %s", e)
+
+            active_state = self.cfg.linear_states.active
+            moved = await client.update_issue_state(issue_id, active_state)
+            if not moved:
+                logger.warning(
+                    "Failed to move %s to active after rework", issue.identifier
                 )
+            self._last_issues[issue_id] = issue
+            self._schedule_retry(issue, attempt_num=0, delay_ms=1000)
+            logger.info(
+                "Rework issue=%s gate=%s rework_to=%s run=%s",
+                issue.identifier, gate_state, rework_to, new_run,
+            )
+
+    async def _handle_multica_gate_responses(self):
+        """Process pending gate responses for all tracked Multica gates."""
+        for issue_id in list(self._pending_gates):
+            await self._handle_multica_gate_response_for(issue_id)
 
     async def _render_prompt_async(
         self, issue: Issue, attempt_num: int | None, state_name: str | None = None
@@ -1031,13 +1266,6 @@ class Orchestrator:
             )
         except TemplateSyntaxError as e:
             raise RuntimeError(f"Template syntax error: {e}")
-
-    def _on_child_pid(self, pid: int, is_register: bool):
-        """Track child claude process PIDs for cleanup on shutdown."""
-        if is_register:
-            self._child_pids.add(pid)
-        else:
-            self._child_pids.discard(pid)
 
     def _on_agent_event(self, identifier: str, event_type: str, event: dict):
         """Callback for agent events."""
@@ -1156,20 +1384,13 @@ class Orchestrator:
             state_lower = current_state.strip().lower()
 
             if state_lower in terminal_lower:
-                # Terminal - stop worker and clean workspace
+                # Terminal - stop worker (workspace lifecycle is external in multica mode)
                 logger.info(
                     f"Reconciliation: {issue_id} is terminal ({current_state}), stopping"
                 )
                 task = self._tasks.get(issue_id)
                 if task:
                     task.cancel()
-
-                attempt = self.running.get(issue_id)
-                if attempt:
-                    ws_root = self.cfg.workspace.resolved_root()
-                    await remove_workspace(
-                        ws_root, attempt.issue_identifier, self.cfg.hooks
-                    )
 
                 self.running.pop(issue_id, None)
                 self._tasks.pop(issue_id, None)
