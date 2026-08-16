@@ -243,6 +243,16 @@ def test_update_issue_state_maps_linear_names(fake_bin, state_file):
     assert read_state(state_file)["issues"][0]["status"] == "done"
 
 
+def test_set_issue_metadata(fake_bin, state_file):
+    seed(state_file, issues=[issue(id="a")])
+    tracker = make_tracker(fake_bin, state_file)
+    # write + overwrite both gate outcomes on the same key
+    assert run(tracker.set_issue_metadata("a", "gate.research-review", "approved")) is True
+    assert read_state(state_file)["metadata"]["a"]["gate.research-review"] == "approved"
+    assert run(tracker.set_issue_metadata("a", "gate.research-review", "rework")) is True
+    assert read_state(state_file)["metadata"]["a"]["gate.research-review"] == "rework"
+
+
 def test_create_agent_issue(fake_bin, state_file):
     seed(state_file)
     tracker = make_tracker(fake_bin, state_file)
@@ -617,6 +627,30 @@ def test_multica_gate_approve_moves_to_done(tmp_path, fake_bin, state_file):
     assert data["issues"][0]["status"] == "done"
     bodies = [c["content"] for c in data["comments"]["iss-1"]]
     assert any('"status": "approved"' in b for b in bodies)
+
+
+def test_multica_gate_writes_metadata_on_approve(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    _seed_gate(state_file, run=1, decision="approve")
+    orch = _gate_orchestrator(wf)
+    _set_gate_state(orch, run=1)
+
+    run(orch._handle_multica_gate_responses())
+
+    data = read_state(state_file)
+    assert data["metadata"]["iss-1"]["gate.gate"] == "approved"
+
+
+def test_multica_gate_writes_metadata_on_rework(tmp_path, fake_bin, state_file):
+    wf = _write_workflow(tmp_path, fake_bin)
+    _seed_gate(state_file, run=1, decision="rework")
+    orch = _gate_orchestrator(wf)
+    _set_gate_state(orch, run=1)
+
+    run(orch._handle_multica_gate_responses())
+
+    data = read_state(state_file)
+    assert data["metadata"]["iss-1"]["gate.gate"] == "rework"
 
 
 def test_multica_run_stage_creates_and_polls_subissue(tmp_path, fake_bin, state_file):

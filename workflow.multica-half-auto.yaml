@@ -17,7 +17,9 @@
 # 与 linear-half-auto 的差异:
 #   - tracker.kind: multica，全部走 multica CLI（--output json）
 #   - gate 协议改为评论驱动：gate 时父 issue 移到 in_review，人工在评论里
-#     写 "approve" 或 "rework" 关键字决定放行/返工（见 README multica 段）
+#     写 "approve" 或 "rework" 关键字决定放行/返工；判定结果同时写入父
+#     issue metadata（gate.<state> = approved|rework，如 gate.research-review），
+#     作为结构化 KV 补充评论关键字判定（见 README multica 段）
 #   - agent stage 不 spawn claude/codex 子进程，而是创建子 issue
 #     （--parent <父issue> --assignee <codex agent> --stage N）并轮询到 done
 #

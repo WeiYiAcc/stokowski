@@ -11,6 +11,7 @@ State file shape:
   "issues": [ {id, identifier, title, description, status, priority, labels,
                parent_issue_id, stage, created_at, updated_at} ],
   "comments": { "<issue_id>": [ {id, content, created_at, author_type} ] },
+  "metadata": { "<issue_id>": { "<key>": "<value>" } },
   "next_id": 100,
   "auto_done_after": { "<issue_id>": N },   # after N `issue get` calls, status -> done
   "log": [ "issue status iss-1 done", ... ]
@@ -211,6 +212,31 @@ def main(argv):
         state["log"].append(f"create {nid} parent={parent} stage={stage} assignee={assignee}")
         save(state)
         out({"id": nid})
+
+    if sub == "metadata":
+        meta_sub = rest[0]
+        rest = rest[1:]
+        if meta_sub == "set":
+            issue_id = rest[0]
+            key = arg_value(rest, "--key")
+            value = arg_value(rest, "--value")
+            if not key or value is None:
+                err("fake multica: metadata set requires --key and --value")
+            issue = find_issue(state, issue_id)
+            if issue is None:
+                err(f"issue {issue_id} not found")
+            state.setdefault("metadata", {}).setdefault(issue_id, {})[key] = value
+            state["log"].append(f"metadata set {issue_id} {key}={value}")
+            save(state)
+            out({key: value})
+        elif meta_sub == "delete":
+            issue_id = rest[0]
+            key = arg_value(rest, "--key")
+            state.setdefault("metadata", {}).get(issue_id, {}).pop(key, None)
+            save(state)
+            out({})
+        else:
+            err(f"fake multica: unknown metadata subcommand {meta_sub}")
 
     err(f"fake multica: unhandled: {argv}")
 

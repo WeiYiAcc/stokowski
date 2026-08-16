@@ -1069,6 +1069,15 @@ class Orchestrator:
             decision = evaluate_gate_decision(recent)
             run = self._issue_state_runs.get(issue_id, 1)
 
+            # Record the decision as structured issue metadata (gate.<state> =
+            # approved|rework) so an in_review issue carries an unambiguous,
+            # machine-readable outcome — not only comment keywords (WEI-434).
+            if decision in ("approve", "rework") and isinstance(client, MulticaTracker):
+                outcome = "approved" if decision == "approve" else "rework"
+                await client.set_issue_metadata(
+                    issue_id, f"gate.{gate_state}", outcome
+                )
+
             if decision == "approve":
                 self._pending_gates.pop(issue_id, None)
                 comment = make_gate_comment(

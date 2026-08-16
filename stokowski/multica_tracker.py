@@ -17,7 +17,9 @@ State mapping (Linear/logical names -> Multica statuses):
 
 The gate protocol for Multica is comment-driven: a gate state moves the issue
 to ``in_review`` and the human decides by commenting ``approve`` or ``rework``
-on the issue (see ``evaluate_gate_decision``).
+on the issue (see ``evaluate_gate_decision``). The decision is also recorded
+as issue metadata (``gate.<state>`` = ``approved``/``rework``) so an
+``in_review`` issue carries an unambiguous machine-readable outcome.
 """
 from __future__ import annotations
 
@@ -371,6 +373,38 @@ class MulticaTracker:
             return True
         except Exception as e:
             logger.error("Failed to update state for %s: %s", issue_id, e)
+            return False
+
+    async def set_issue_metadata(self, issue_id: str, key: str, value: str) -> bool:
+        """Write a metadata key/value on an issue. Returns True on success.
+
+        Used to record gate decisions (``gate.<state>`` = ``approved`` /
+        ``rework``) as structured KV via ``multica issue metadata set`` —
+        complementing the comment-driven gate protocol so an ``in_review``
+        issue carries an unambiguous, machine-readable outcome.
+        """
+        try:
+            await asyncio.to_thread(
+                self._run_cli,
+                [
+                    "issue",
+                    "metadata",
+                    "set",
+                    issue_id,
+                    "--key",
+                    key,
+                    "--value",
+                    value,
+                    "--type",
+                    "string",
+                    "--output",
+                    "json",
+                ],
+            )
+            logger.info("Multica tracker: metadata %s=%s on %s", key, value, issue_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to write metadata %s on %s: %s", key, issue_id, e)
             return False
 
     async def close(self):

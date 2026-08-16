@@ -522,6 +522,11 @@ linear_states:
 3. Rework counts against the gate's `max_rework`; once exceeded the issue stays
    in `in_review` and an **escalated** comment is posted for human intervention.
 
+Every decision is also recorded as issue metadata — `gate.<state>` = `approved`
+or `rework` (e.g. `gate.research-review`). That structured KV is the
+machine-readable outcome of the gate, so an `in_review` issue carries an
+unambiguous result without re-scanning comment keywords.
+
 Only comments newer than the current gate's waiting comment count are
 considered, so an old `approve` from a previous cycle cannot auto-advance a
 later gate.
