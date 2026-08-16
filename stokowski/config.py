@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,31 +21,13 @@ class TrackerConfig:
     api_key: str = ""
     project_slug: str = ""
     tasks_dir: str = ""  # for kind: local
+    provider: dict[str, Any] = field(default_factory=dict)  # for kind: multica (project_id, workspace_id, assignee)
+    multica_bin: str = ""  # for kind: multica (CLI path; overrides MULTICA_BIN env)
 
 
 @dataclass
 class PollingConfig:
     interval_ms: int = 30_000
-
-
-@dataclass
-class WorkspaceConfig:
-    root: str = ""
-
-    def resolved_root(self) -> Path:
-        if self.root:
-            return Path(os.path.expandvars(os.path.expanduser(self.root)))
-        return Path(tempfile.gettempdir()) / "stokowski_workspaces"
-
-
-@dataclass
-class HooksConfig:
-    after_create: str | None = None
-    before_run: str | None = None
-    after_run: str | None = None
-    before_remove: str | None = None
-    on_stage_enter: str | None = None
-    timeout_ms: int = 60_000
 
 
 @dataclass
@@ -78,6 +59,7 @@ class ServerConfig:
 @dataclass
 class LinearStatesConfig:
     """Maps logical state names to actual Linear state names."""
+
     todo: str = "Todo"
     active: str = "In Progress"
     review: str = "Human Review"
@@ -89,17 +71,19 @@ class LinearStatesConfig:
 @dataclass
 class PromptsConfig:
     """Prompt file references."""
+
     global_prompt: str | None = None
 
 
 @dataclass
 class StateConfig:
     """A single state in the state machine."""
+
     name: str = ""
-    type: str = "agent"              # "agent", "gate", "terminal"
-    prompt: str | None = None        # path to prompt .md file
-    linear_state: str = "active"     # key into LinearStatesConfig
-    runner: str = "claude"
+    type: str = "agent"  # "agent", "gate", "terminal"
+    prompt: str | None = None  # path to prompt .md file
+    linear_state: str = "active"  # key into LinearStatesConfig
+    multica_assignee: str = ""  # multica only: which agent/squad runs this stage's sub-issue
     model: str | None = None
     max_turns: int | None = None
     turn_timeout_ms: int | None = None
@@ -107,10 +91,9 @@ class StateConfig:
     session: str = "inherit"
     permission_mode: str | None = None
     allowed_tools: list[str] | None = None
-    rework_to: str | None = None     # gate only
-    max_rework: int | None = None    # gate only
+    rework_to: str | None = None  # gate only
+    max_rework: int | None = None  # gate only
     transitions: dict[str, str] = field(default_factory=dict)
-    hooks: HooksConfig | None = None
 
 
 @dataclass
@@ -123,8 +106,6 @@ class WorkflowDefinition:
 class ServiceConfig:
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     polling: PollingConfig = field(default_factory=PollingConfig)
-    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
-    hooks: HooksConfig = field(default_factory=HooksConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -231,31 +212,16 @@ def _coerce_list(val: Any) -> list[str]:
     return []
 
 
-def _parse_hooks(raw: dict[str, Any] | None) -> HooksConfig | None:
-    """Parse a hooks dict into HooksConfig, returning None if empty."""
-    if not raw:
-        return None
-    return HooksConfig(
-        after_create=raw.get("after_create"),
-        before_run=raw.get("before_run"),
-        after_run=raw.get("after_run"),
-        before_remove=raw.get("before_remove"),
-        on_stage_enter=raw.get("on_stage_enter"),
-        timeout_ms=_coerce_int(raw.get("timeout_ms"), 60_000),
-    )
-
-
 def _parse_state_config(name: str, raw: dict[str, Any]) -> StateConfig:
     """Parse a single state entry from YAML into StateConfig."""
     allowed = raw.get("allowed_tools")
-    hooks_raw = raw.get("hooks")
 
     return StateConfig(
         name=name,
         type=str(raw.get("type", "agent")),
         prompt=raw.get("prompt"),
         linear_state=str(raw.get("linear_state", "active")),
-        runner=str(raw.get("runner", "claude")),
+        multica_assignee=str(raw.get("multica_assignee", "")),
         model=raw.get("model"),
         max_turns=raw.get("max_turns"),
         turn_timeout_ms=raw.get("turn_timeout_ms"),
@@ -266,15 +232,14 @@ def _parse_state_config(name: str, raw: dict[str, Any]) -> StateConfig:
         rework_to=raw.get("rework_to"),
         max_rework=raw.get("max_rework"),
         transitions=raw.get("transitions") or {},
-        hooks=_parse_hooks(hooks_raw) if hooks_raw else None,
     )
 
 
 def merge_state_config(
-    state: StateConfig, root_claude: ClaudeConfig, root_hooks: HooksConfig
-) -> tuple[ClaudeConfig, HooksConfig]:
-    """Merge state overrides with root defaults. Returns (claude_cfg, hooks_cfg)."""
-    claude = ClaudeConfig(
+    state: StateConfig, root_claude: ClaudeConfig
+) -> ClaudeConfig:
+    """Merge state overrides with root defaults."""
+    return ClaudeConfig(
         command=root_claude.command,
         permission_mode=state.permission_mode or root_claude.permission_mode,
         allowed_tools=state.allowed_tools if state.allowed_tools is not None else root_claude.allowed_tools,
@@ -284,8 +249,6 @@ def merge_state_config(
         stall_timeout_ms=state.stall_timeout_ms if state.stall_timeout_ms is not None else root_claude.stall_timeout_ms,
         append_system_prompt=root_claude.append_system_prompt,
     )
-    hooks = state.hooks if state.hooks is not None else root_hooks
-    return claude, hooks
 
 
 def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
@@ -323,26 +286,13 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
         api_key=str(t.get("api_key", "")),
         project_slug=str(t.get("project_slug", "")),
         tasks_dir=str(t.get("tasks_dir", "")),
+        provider=t.get("provider") or {},
+        multica_bin=str(t.get("multica_bin", "")),
     )
 
     # Parse polling
     p = config_raw.get("polling", {}) or {}
     polling = PollingConfig(interval_ms=_coerce_int(p.get("interval_ms"), 30_000))
-
-    # Parse workspace
-    w = config_raw.get("workspace", {}) or {}
-    workspace = WorkspaceConfig(root=str(w.get("root", "")))
-
-    # Parse hooks
-    h = config_raw.get("hooks", {}) or {}
-    hooks = HooksConfig(
-        after_create=h.get("after_create"),
-        before_run=h.get("before_run"),
-        after_run=h.get("after_run"),
-        before_remove=h.get("before_remove"),
-        on_stage_enter=h.get("on_stage_enter"),
-        timeout_ms=_coerce_int(h.get("timeout_ms"), 60_000),
-    )
 
     # Parse claude
     c = config_raw.get("claude", {}) or {}
@@ -397,8 +347,6 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
     cfg = ServiceConfig(
         tracker=tracker,
         polling=polling,
-        workspace=workspace,
-        hooks=hooks,
         claude=claude,
         agent=agent,
         server=server,
@@ -423,6 +371,13 @@ def validate_config(cfg: ServiceConfig) -> list[str]:
     elif cfg.tracker.kind == "local":
         if not cfg.tracker.tasks_dir:
             errors.append("Missing tracker.tasks_dir for local tracker")
+    elif cfg.tracker.kind == "multica":
+        provider = cfg.tracker.provider or {}
+        if not (provider.get("project_id") or cfg.tracker.project_slug):
+            errors.append(
+                "Missing tracker.provider.project_id for multica tracker "
+                "(the Multica project UUID)"
+            )
     else:
         errors.append(f"Unsupported tracker kind: {cfg.tracker.kind}")
 

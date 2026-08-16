@@ -7,7 +7,7 @@
 #   3. 编辑 workflow.yaml：填上 your-org/your-target-repo 真实路径
 #                        + your-linear-project-slug 真实 slug
 #                        + 确认 LINEAR_API_KEY 在 env / .env
-#   4. stokowski workflow.yaml
+#   4. 通过 Multica runner 调用 stokowski 编排语义
 #
 # 用途: 简单功能、信任 agent、Linear 只作日志
 
@@ -30,87 +30,6 @@ linear_states:
 
 polling:
   interval_ms: 15000
-
-workspace:
-  root: $STOKOWSKI_REPO_ROOT/agent-state/stokowski-workspaces/auto
-
-# =============================================================================
-# TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
-# =============================================================================
-# 当前 yaml 是 single-target pipeline：Linear project 下所有 issue 都假定
-# 改同一个仓库，路径写在 hook 的 TARGET_REPO env var 里。
-#
-# 复制到 workflow.yaml 后：
-#   - 把 "$HOME/ghq/github.com/your-org/your-target-repo" 改成真实路径
-#   - 两处都要改（after_create + before_remove）
-#
-# 未来如果要单 yaml 跑多 target：需要 stokowski 上游加一个 patch，让 issue
-# label / description 里的 target 字段能透传到 hook 的 env。当前 run_hook
-# 不注入 env，所以做不到。
-# =============================================================================
-
-hooks:
-  # after_create: convert the empty workspace dir into a working copy of
-  # TARGET_REPO. Uses jj workspace add when the target uses jj; falls back
-  # to git worktree add for plain-git repos.
-  #
-  # Outcomes:
-  #   - 3 issues can run in parallel without working-copy conflicts
-  #   - The agent's commits are visible in the main repo's history
-  #   - Roll-back is per-ticket (just forget the workspace / remove the worktree)
-  #   - The user can keep working in the main repo concurrently
-  after_create: |
-    set -euo pipefail
-    WS_PATH="$(pwd -P)"
-    WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
-    cd "$TARGET_REPO"
-    if [ -d ".jj" ]; then
-      # jj workspace add accepts an empty existing dir; populates it with
-      # working-copy files and adds it to `jj workspace list`.
-      jj workspace add "$WS_PATH" --name "$WS_NAME"
-      echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
-    else
-      # Plain git fallback: use git worktree with a per-issue branch.
-      # NOTE: this branch is UNTESTED end-to-end (no actual stokowski run on
-      # a git-only target yet, only smoke-tested manually). The push protocol
-      # in global.md assumes the agent pushes directly to master; under git
-      # the agent is on a side branch (stokowski-<id>), so `git push origin
-      # HEAD:master` is required and may need rebase. Audit before first
-      # real use against a git target.
-      rmdir "$WS_PATH"
-      DEFAULT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
-      git worktree add -B "$WS_NAME" "$WS_PATH" "$DEFAULT_BRANCH"
-      echo "[after_create] git worktree created at $WS_PATH (branch=$WS_NAME from $DEFAULT_BRANCH)"
-    fi
-
-  # before_remove: archive the workspace's final state and detach the jj
-  # workspace (or remove the git worktree) before stokowski rmtree's the
-  # dir. The actual commits stay in the main repo — only the working copy
-  # is detached.
-  before_remove: |
-    set -euo pipefail
-    WS_PATH="$(pwd -P)"
-    WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
-    # Archive working-copy state for forensics.
-    mkdir -p "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/auto/"
-    cp -r . "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/auto/$(basename "$WS_PATH")/" 2>/dev/null || true
-    # Detach workspace/worktree (commits remain in main repo).
-    cd "$TARGET_REPO"
-    if [ -d ".jj" ]; then
-      jj workspace forget "$WS_NAME" 2>/dev/null || true
-      echo "[before_remove] detached jj workspace $WS_NAME"
-    else
-      # Detach worktree but KEEP the branch (it holds the agent's commits;
-      # human reviewer can git merge / git cherry-pick / git push from main
-      # repo afterwards). The branch is named $WS_NAME so it's discoverable
-      # via `git branch | grep stokowski-`.
-      git worktree remove --force "$WS_PATH" 2>/dev/null || true
-      echo "[before_remove] removed git worktree at $WS_PATH (branch $WS_NAME kept for review)"
-    fi
-
-  timeout_ms: 120000
 
 claude:
   permission_mode: auto

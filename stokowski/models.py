@@ -34,7 +34,6 @@ class RunAttempt:
     issue_id: str
     issue_identifier: str
     attempt: int | None = None
-    workspace_path: str = ""
     started_at: datetime | None = None
     status: str = "pending"
     session_id: str | None = None

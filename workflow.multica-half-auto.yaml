@@ -1,0 +1,114 @@
+# =============================================================================
+# Stokowski — 半自动流水线模板（Multica tracker，含人工 gate）
+# =============================================================================
+# 这是模板。要使用：
+#   1. cp workflow.multica-half-auto.yaml workflow.yaml
+#   2. cp prompts_multica-half-auto/*.md prompts/
+#   3. 编辑 workflow.yaml：填上 Multica project ID（uuid）+ workspace_id
+#                          + 负责执行的 codex 系 agent 名（tracker.provider.assignee）
+#   4. 确认 multica CLI 可用（MULTICA_BIN 环境变量或 tracker.multica_bin 指向它；
+#      CLI 不在 PATH 时需要显式设置）
+#   5. 通过 Multica runner 调用 stokowski 编排语义
+#
+# Tracker: multica（tracker.kind: multica）—— 声明式状态机前端 +
+#          Multica 执行/门后端。每个 agent stage 是一个 Multica 子 issue。
+#
+# 与 linear-half-auto 的差异:
+#   - tracker.kind: multica，全部走 multica CLI（--output json）
+#   - gate 协议改为评论驱动：gate 时父 issue 移到 in_review，人工在评论里
+#     写 "approve" 或 "rework" 关键字决定放行/返工
+#   - agent stage 不 spawn claude/codex 子进程，而是创建子 issue
+#     （--parent <父issue> --assignee <codex agent> --stage N）并轮询到 done
+
+tracker:
+  kind: multica
+  project_slug: "your-multica-project-id"   # 兼容字段（可留空，以 provider.project_id 为准）
+  provider:
+    project_id: "your-multica-project-id"   # Multica 项目 UUID（必填）
+    workspace_id: "your-workspace-id"       # 可选
+    assignee: "codex"                       # 子 issue 分派给的 codex 系 agent 名（必填）
+  # multica_bin: "~/.local/share/mise/installs/github-multica-ai-multica/latest/multica"
+  #   （CLI 不在 PATH 时设这里，或导出 MULTICA_BIN；适配器会自动 unset HTTPS_PROXY）
+
+linear_states:
+  todo: "todo"
+  active: "in_progress"
+  review: "in_review"
+  gate_approved: "in_review"
+  rework: "blocked"
+  terminal:
+    - done
+    - cancelled
+
+polling:
+  interval_ms: 15000
+
+claude:
+  permission_mode: auto
+  model: claude-sonnet-4-6
+  max_turns: 20
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+
+agent:
+  max_concurrent_agents: 3
+  max_concurrent_agents_by_state:
+    code-review: 1   # 串行 review 防 merge 冲突
+  max_retry_backoff_ms: 300000
+
+prompts:
+  global_prompt: prompts/global.md
+
+# 半自动：investigate → research-review (gate) → implement → implementation-review (gate) → code-review → done
+# 每个 agent stage 的 multica_assignee 决定 sub-issue 分派给哪个 Multica agent/squad；
+# 实际执行 = 创建 Multica 子 issue 并轮询到 done，不 spawn 内层 agent。
+states:
+  investigate:
+    type: agent
+    prompt: prompts/investigate.md
+    linear_state: active
+    multica_assignee: codex
+    max_turns: 8
+    session: inherit
+    transitions:
+      complete: research-review
+
+  research-review:
+    type: gate
+    linear_state: review
+    rework_to: investigate
+    max_rework: 3
+    transitions:
+      approve: implement
+
+  implement:
+    type: agent
+    prompt: prompts/implement.md
+    linear_state: active
+    multica_assignee: codex
+    max_turns: 40
+    session: inherit
+    transitions:
+      complete: implementation-review
+
+  implementation-review:
+    type: gate
+    linear_state: review
+    rework_to: implement
+    max_rework: 5
+    transitions:
+      approve: code-review
+
+  code-review:
+    type: agent
+    prompt: prompts/review.md
+    linear_state: active
+    multica_assignee: codex
+    max_turns: 10
+    session: fresh
+    transitions:
+      complete: done
+
+  done:
+    type: terminal
+    linear_state: terminal

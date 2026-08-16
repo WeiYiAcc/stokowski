@@ -3,8 +3,6 @@
 # =============================================================================
 #
 # Copy this file to workflow.yaml and customise for your project.
-# Stokowski re-reads this file on every poll tick — changes take effect
-# without restart.
 #
 # Prompt files live in the prompts/ directory.  Each agent state references
 # its prompt via the `prompt` field.  A global prompt (shared preamble) is
@@ -18,9 +16,9 @@
 #   terminal      → list of done/closed states
 #
 # State types:
-#   agent    — Stokowski dispatches Claude Code in this state
+#   agent    — agent works in this state
 #   gate     — pauses for human review; approve → next, rework → rework_to
-#   terminal — issue is finished; workspace cleaned up
+#   terminal — issue is finished
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -29,15 +27,14 @@
 tracker:
   kind: linear
   project_slug: "abc123def456"    # hex slugId from your Linear project URL
-  api_key: "lin_api_your_key_here"  # your Linear API key — agents inherit this
+  api_key: "lin_api_your_key_here"  # your Linear API key
 
 # ---------------------------------------------------------------------------
 # Linear state name mapping
 # ---------------------------------------------------------------------------
 # These map Stokowski's internal lifecycle roles to your Linear state names.
 # You can rename values to match your Linear setup (e.g. todo: "Ready"),
-# but all six roles are required — removing or reordering them will break
-# the dispatch and gate protocol.
+# but all six roles are required.
 linear_states:
   todo: "Todo"                        # issues picked up from this state
   active: "In Progress"               # moved here automatically when agent starts
@@ -58,26 +55,7 @@ polling:
   interval_ms: 15000              # 15 seconds between ticks
 
 # ---------------------------------------------------------------------------
-# Workspace
-# ---------------------------------------------------------------------------
-workspace:
-  root: ~/code/stokowski-workspaces
-
-# ---------------------------------------------------------------------------
-# Hooks — shell scripts run in the workspace directory
-# ---------------------------------------------------------------------------
-hooks:
-  after_create: |
-    git clone --depth 1 git@github.com:your-org/your-repo.git .
-    npm install
-  before_run: |
-    git fetch origin main
-    git rebase origin/main 2>/dev/null || git rebase --abort
-  timeout_ms: 120000
-
-# ---------------------------------------------------------------------------
 # Claude defaults (inherited by all agent states unless overridden)
-# States using runner: codex will use the Codex CLI instead.
 # ---------------------------------------------------------------------------
 claude:
   permission_mode: auto
@@ -173,13 +151,10 @@ states:
   # ── 5. Code Review ─────────────────────────────────────────────────────
   # Automated adversarial review: fresh session, no prior context.
   # Opus reviews the diff and posts findings.
-  # Tip: set runner: codex here to get a second-opinion from a different
-  # provider — different states can use different runners in the same run.
   code-review:
     type: agent
     prompt: prompts/review.example.md
     linear_state: active
-    runner: claude              # "claude" (default) or "codex"
     model: claude-opus-4-6
     max_turns: 10
     session: fresh              # no prior context — adversarial review

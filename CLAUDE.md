@@ -1,6 +1,8 @@
 # Stokowski
 
-Claude Code adaptation of [OpenAI's Symphony](https://github.com/openai/symphony). Orchestrates Claude Code agents via Linear issues.
+Orchestration semantics for autonomous coding agents, based on [OpenAI's Symphony](https://github.com/openai/symphony).
+
+> **Architecture transition (WEI-441):** Stokowski is being refactored from a self-contained daemon into a runner-agnostic orchestration library. The built-in CLI runner (`runner.py`), Linear/local trackers (`linear.py`, `local_tracker.py`), and workspace manager (`workspace.py`) have been removed in S1-A. The poll loop (`orchestrator.py`) and CLI (`main.py`) remain as transitional scaffolding for the Multica tracker adapter and will be removed/rewritten in S2 (WEI-444 library API-ification). This file retains historical context; sections describing deleted modules are stale and will be rewritten in a follow-up.
 
 This file is the single source of truth for contributors. It covers architecture, design decisions, key behaviours, and how to work on the codebase.
 
@@ -8,16 +10,16 @@ This file is the single source of truth for contributors. It covers architecture
 
 ## What it does
 
-Stokowski is a long-running Python daemon that:
-1. Polls Linear for issues in configured active states
-2. Creates an isolated git-cloned workspace per issue
-3. Launches Claude Code (`claude -p`) in that workspace
-4. Manages multi-turn sessions via `--resume <session_id>`
-5. Retries failures with exponential backoff
-6. Reconciles running agents against Linear state changes
-7. Exposes a live web dashboard and terminal UI
+Stokowski is an orchestration library that:
+1. Parses `workflow.yaml` into typed config (`ServiceConfig`, `StateConfig`, etc.)
+2. Assembles three-layer prompts (global + stage + lifecycle) for a given issue and state
+3. Defines state machine semantics (agent / gate / terminal states, transitions, rework)
+4. Provides a Multica tracker adapter that turns each agent stage into a Multica sub-issue
+5. Provides tracking comment helpers for crash recovery and rework context
 
-The agent prompt, runtime config, and workspace setup all live in `workflow.yaml` in the operator's directory — not in this codebase.
+The actual polling, workspace creation, agent execution, and retry logic are handled by the consuming runner (e.g. Multica). The agent prompt and state machine config live in `workflow.yaml` and `prompts/` in the operator's directory — not in this codebase.
+
+`orchestrator.py` and `main.py` are transitional scaffolding used by the Multica tracker tests and will be removed/rewritten in S2 (WEI-444).
 
 ---
 
@@ -25,18 +27,17 @@ The agent prompt, runtime config, and workspace setup all live in `workflow.yaml
 
 ```
 stokowski/
-  config.py        workflow.yaml parser + typed config dataclasses
-  linear.py        Linear GraphQL client (httpx async)
-  models.py        Domain models: Issue, RunAttempt, RetryEntry
-  orchestrator.py  Main poll loop, dispatch, reconciliation, retry
-  prompt.py        Three-layer prompt assembly for state machine workflows
-  runner.py        Claude Code CLI integration, stream-json parser
-  tracking.py      State machine tracking via structured Linear comments
-  workspace.py     Per-issue workspace lifecycle and hooks
-  web.py           Optional FastAPI dashboard
-  main.py          CLI entry point, keyboard handler
-  __main__.py      Enables python -m stokowski
+  config.py           workflow.yaml parser + typed config dataclasses
+  models.py           Domain models: Issue, RunAttempt, RetryEntry
+  multica_tracker.py  Multica tracker adapter (sub-issue lifecycle)
+  orchestrator.py     State machine dispatch, gate handling, retry scheduling
+  prompt.py           Three-layer prompt assembly for state machine workflows
+  tracking.py         State machine tracking via structured Linear comments
+  main.py             CLI entry point (--dry-run only)
+  __main__.py         Enables python -m stokowski
 ```
+
+Removed in WEI-441 S1-A: `runner.py`, `linear.py`, `local_tracker.py`, `workspace.py`, `web.py`. These responsibilities moved to the consuming runner. `orchestrator.py` and `main.py` remain as transitional scaffolding and will be removed/rewritten in S2 (WEI-444).
 
 ---
 
@@ -82,20 +83,20 @@ Every first-turn launch appends a system prompt via `--append-system-prompt` tha
 
 ### config.py
 Parses `workflow.yaml` (or legacy `.md` with front matter) into typed dataclasses:
-- `TrackerConfig` — Linear endpoint, API key, project slug
-- `PollingConfig` — interval
-- `WorkspaceConfig` — root path (supports `~` and `$VAR` expansion)
-- `HooksConfig` — shell scripts for lifecycle events + timeout (includes `on_stage_enter`)
+- `TrackerConfig` — tracker endpoint, API key, project slug, multica provider/bin
+- `PollingConfig` — polling interval hint
 - `ClaudeConfig` — command, permission mode, model, timeouts, system prompt
 - `AgentConfig` — concurrency limits (global + per-state)
-- `ServerConfig` — optional web dashboard port
-- `LinearStatesConfig` — maps logical state names (`todo`, `active`, `review`, `gate_approved`, `rework`, `terminal`) to actual Linear state names. Issues in the `todo` state are picked up and automatically moved to `active` on dispatch.
+- `ServerConfig` — optional web dashboard port hint
+- `LinearStatesConfig` — maps logical state names (`todo`, `active`, `review`, `gate_approved`, `rework`, `terminal`) to actual Linear state names
 - `PromptsConfig` — global prompt file reference
-- `StateConfig` — a single state in the state machine: type, prompt path, linear_state key, runner, session mode, transitions, per-state overrides (model, max_turns, timeouts, hooks), gate-specific fields (rework_to, max_rework)
+- `StateConfig` — a single state in the state machine: type, prompt path, linear_state key, multica_assignee, session mode, transitions, per-state overrides (model, max_turns, timeouts), gate-specific fields (rework_to, max_rework)
 
 `ServiceConfig` provides helper methods: `entry_state` (first agent state), `active_linear_states()`, `gate_linear_states()`, `terminal_linear_states()`.
 
-`merge_state_config(state, root_claude, root_hooks)` merges per-state overrides with root defaults — only specified fields are overridden. Returns `(ClaudeConfig, HooksConfig)`.
+`merge_state_config(state, root_claude)` merges per-state overrides with root defaults — only specified fields are overridden. Returns `ClaudeConfig`.
+
+`WorkspaceConfig` and `HooksConfig` were removed in WEI-441 S1-A; workspace lifecycle is now the runner's responsibility.
 
 `parse_workflow_file()` detects format by file extension: `.yaml`/`.yml` files are parsed as pure YAML; `.md` files are split on `---` delimiters for front matter + body.
 
@@ -253,20 +254,21 @@ Exit code 0 = success. Non-zero = failure (stderr captured for error message).
 ## Development setup
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[web]"
+uv sync --extra test
+
+# Run the test suite
+uv run pytest
 
 # Validate config without dispatching agents
-stokowski --dry-run
-
-# Run with verbose logging
-stokowski -v
-
-# Run with web dashboard
-stokowski --port 4200
+uv run python - <<'PY'
+from stokowski.config import parse_workflow_file, validate_config
+defn = parse_workflow_file("workflow.yaml")
+for e in validate_config(defn.config):
+    print("error:", e)
+PY
 ```
 
-There are no automated tests beyond `--dry-run`. The system is best verified by running against a real Linear project with a test ticket.
+The repository now has 30+ tests in `tests/test_multica_tracker.py` covering the Multica tracker adapter. The system is best verified by running against a real Multica project with a test ticket.
 
 ---
 

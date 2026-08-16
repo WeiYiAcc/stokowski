@@ -7,7 +7,7 @@
 #   3. 编辑 workflow.yaml：填上 your-org/your-target-repo 真实路径
 #                        + your-linear-project-slug 真实 slug
 #                        + 确认 LINEAR_API_KEY 在 env / .env
-#   4. stokowski workflow.yaml
+#   4. 通过 Multica runner 调用 stokowski 编排语义
 #
 # 用途: 复杂或高风险改动，每个关键节点暂停等人工审核后再继续
 #
@@ -17,14 +17,6 @@
 #   - gate 期间 Linear issue 状态会变成 "Human Review"
 #   - 人工切到 "Gate Approved" 触发下一阶段；切到 "Rework" 回退重做
 #   - max_rework 限制每个 gate 的返工次数
-#
-# 使用流程（拷贝到 workflow.yaml 后）:
-#   1. 在 Linear 创建 issue (Backlog)
-#   2. 状态改 Todo，stokowski 拾取 → investigate state
-#   3. investigate 完成后状态自动变 Human Review
-#   4. 你 review 后切 Gate Approved → implement state
-#   5. implement 完成 → 又一次 Human Review → 切 Gate Approved → code-review
-#   6. code-review 通过 → Done
 
 tracker:
   kind: linear
@@ -45,49 +37,6 @@ linear_states:
 
 polling:
   interval_ms: 15000
-
-workspace:
-  root: $STOKOWSKI_REPO_ROOT/agent-state/stokowski-workspaces/half-auto
-
-# =============================================================================
-# TARGET_REPO 占位符 — 复制到 workflow.yaml 后必须替换
-# 详见 workflow.linear-full-auto.yaml 同位置的注释。
-# =============================================================================
-
-hooks:
-  after_create: |
-    set -euo pipefail
-    WS_PATH="$(pwd -P)"
-    WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
-    cd "$TARGET_REPO"
-    if [ -d ".jj" ]; then
-      jj workspace add "$WS_PATH" --name "$WS_NAME"
-      echo "[after_create] jj workspace $WS_NAME created at $WS_PATH"
-    else
-      rmdir "$WS_PATH"
-      DEFAULT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
-      git worktree add -B "$WS_NAME" "$WS_PATH" "$DEFAULT_BRANCH"
-      echo "[after_create] git worktree created at $WS_PATH (branch=$WS_NAME from $DEFAULT_BRANCH)"
-    fi
-
-  before_remove: |
-    set -euo pipefail
-    WS_PATH="$(pwd -P)"
-    WS_NAME="stokowski-$(basename "$WS_PATH")"
-    TARGET_REPO="$HOME/ghq/github.com/your-org/your-target-repo"
-    mkdir -p "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/half-auto/"
-    cp -r . "$STOKOWSKI_REPO_ROOT/agent-state/stokowski-results/half-auto/$(basename "$WS_PATH")/" 2>/dev/null || true
-    cd "$TARGET_REPO"
-    if [ -d ".jj" ]; then
-      jj workspace forget "$WS_NAME" 2>/dev/null || true
-      echo "[before_remove] detached jj workspace $WS_NAME"
-    else
-      git worktree remove --force "$WS_PATH" 2>/dev/null || true
-      echo "[before_remove] removed git worktree at $WS_PATH (branch $WS_NAME kept for review)"
-    fi
-
-  timeout_ms: 120000
 
 claude:
   permission_mode: auto

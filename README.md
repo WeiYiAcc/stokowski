@@ -2,9 +2,9 @@
 
 # Stokowski
 
-**Autonomous coding agents, orchestrated by Linear issues.**
+**Orchestration semantics for autonomous coding agents, driven by Linear issues.**
 
-Built on [OpenAI's Symphony](https://github.com/openai/symphony) spec and taken further — with configurable state machines, gate-based human review, multi-runner support, and a live web dashboard. Works with [Claude Code](https://claude.ai/claude-code), [Codex](https://openai.com/index/introducing-codex/), and [Linear](https://linear.app).
+Built on [OpenAI's Symphony](https://github.com/openai/symphony) spec. Stokowski provides the `workflow.yaml` state machine, prompt assembly, and tracking protocol. Execution is handled by the consuming runner (e.g. [Multica](https://github.com/WeiYiAcc/multica)) — the built-in CLI runner, workspace manager, and Linear/local trackers have been removed in WEI-441 S1-A.
 
 [![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-22c55e)](LICENSE)
@@ -108,7 +108,6 @@ Stokowski agent:        Claude reads CLAUDE.md               ← same convention
 | State machine | Configurable stages, gates, transitions, rework loops | No workflow engine — single-shot agent runs |
 | Human review gates | Built-in gate protocol with approve/rework Linear states | No gate protocol |
 | Prompt assembly | Three-layer Jinja2 (global + stage + auto-injected lifecycle) | No custom prompt templates |
-| Quality gate hooks | `before_run` / `after_run` / `on_stage_enter` shell scripts | Not available |
 | Retry & recovery | Exponential backoff, stall detection, crash recovery from tracking comments | No retry logic |
 | Issue trackers | Linear | Linear, Jira, GitHub Issues |
 | MCP servers | Any `.mcp.json` in the workspace | MCP support |
@@ -149,18 +148,17 @@ Linear issue → isolated git clone → agent (Claude or Codex) → PR + Human R
 
 ## Features
 
-- **Configurable state machine** — define agent stages, human gates, and transitions in `workflow.yaml`; issues flow through your pipeline automatically
-- **Multi-runner** — Claude Code and Codex in the same pipeline; different states can use different runners and models (e.g. Opus for investigation, Sonnet for implementation, Codex for review)
+- **Configurable state machine** — define agent stages, human gates, and transitions in `workflow.yaml`
 - **Three-layer prompt assembly** — global prompt + per-stage prompt + auto-injected lifecycle context; each layer is a Jinja2 template with full issue variables
-- **Linear-driven dispatch** — polls for issues in configured states, dispatches agents with bounded concurrency
-- **Session continuity** — multi-turn agent sessions via `--resume` (Claude Code); agents pick up where they left off
-- **Isolated workspaces** — per-issue git clones so parallel agents never conflict
-- **Lifecycle hooks** — `after_create`, `before_run`, `after_run`, `before_remove`, `on_stage_enter` shell scripts for setup, quality gates, and cleanup
-- **Retry with backoff** — failed turns retry automatically with exponential backoff
-- **State reconciliation** — running agents are stopped if their Linear issue moves to a terminal state mid-run
-- **Web dashboard** — live view of agent status, token usage, and last activity at `localhost:<port>`
-- **MCP-aware** — agents inherit `.mcp.json` from the workspace (Figma, Linear, iOS Simulator, Playwright, etc.)
-- **Persistent terminal UI** — live status bar, single-key controls (`q` quit · `s` status · `r` refresh · `h` help)
+- **Linear-driven dispatch semantics** — declare which Linear states map to which agent/gate/terminal stages
+- **Multica tracker adapter** — `tracker.kind: multica` turns each agent stage into a Multica sub-issue and polls it to completion
+- **Session hints** — per-state `session` setting (`inherit` or `fresh`) guides the executing runner
+- **Retry with backoff** — declare retry policy in `workflow.yaml` for the executing runner to apply
+- **State reconciliation semantics** — terminal Linear states stop active work as defined by the runner
+- **MCP-aware prompts** — prompt templates can reference `.mcp.json` and other project context
+- **Runner-agnostic orchestration** — state machine, transitions, and prompts are independent of the executing runner
+
+> **Note:** workspace lifecycle hooks, the per-issue workspace manager, and the built-in Claude Code/Codex CLI runner were removed in WEI-441 S1-A. Runners are responsible for workspace setup, quality gates, and agent execution.
 
 ---
 
@@ -457,6 +455,112 @@ Open `http://localhost:4200` for the live dashboard.
 
 ---
 
+## Multica tracker (`tracker.kind: multica`)
+
+Stokowski's declarative state machine can run against **Multica** as the
+execution and review backend instead of Linear. You keep the same
+`workflow.yaml` state machine, but:
+
+- every **agent stage** becomes a Multica **sub-issue** (a visible run record)
+  assigned to a codex-class agent — Stokowski never spawns an inner agent
+  itself (observability rule)
+- every **gate** moves the issue to `in_review` and is decided by a human
+  commenting **`approve`** or **`rework`** on the issue
+
+### Configuration
+
+```yaml
+tracker:
+  kind: multica
+  provider:
+    project_id: "<multica-project-uuid>"   # required — Multica project ID
+    workspace_id: "<workspace-uuid>"       # optional
+    assignee: "codex"                      # sub-issue assignee (codex-class agent)
+  # multica_bin: "/path/to/multica"        # optional CLI path (see below)
+```
+
+The CLI is resolved from `tracker.multica_bin`, else the `MULTICA_BIN`
+environment variable, else `multica` on PATH. The adapter strips HTTP(S)
+proxies from the subprocess env (a stale `HTTPS_PROXY` pointing at a local
+proxy blocks the Multica CLI).
+
+### State mapping
+
+`linear_states` must use Multica statuses (the adapter also accepts the Linear
+names and maps them):
+
+| `linear_states` key | Multica status |
+|---|---|
+| `todo` | `todo` |
+| `active` | `in_progress` |
+| `review` | `in_review` |
+| `gate_approved` | `in_review` (decided by comment, not a real state) |
+| `rework` | `blocked` |
+| `terminal` | `done`, `cancelled` |
+
+```yaml
+linear_states:
+  todo: "todo"
+  active: "in_progress"
+  review: "in_review"
+  gate_approved: "in_review"
+  rework: "blocked"
+  terminal: [done, cancelled]
+```
+
+### Gate protocol (comment-driven)
+
+1. When an agent stage completes, the issue moves to `in_review` and Stokowski
+   posts a gate "waiting" tracking comment.
+2. A human reviews the sub-issues / workspace and comments on the issue:
+   - `approve` → Stokowski posts an approved comment and advances to the next
+     state.
+   - `rework` → Stokowski posts a rework comment, increments the run counter,
+     moves the issue back to `in_progress`, and re-dispatches `rework_to`.
+3. Rework counts against the gate's `max_rework`; once exceeded the issue stays
+   in `in_review` and an **escalated** comment is posted for human intervention.
+
+Every decision is also recorded as issue metadata — `gate.<state>` = `approved`
+or `rework` (e.g. `gate.research-review`). That structured KV is the
+machine-readable outcome of the gate, so an `in_review` issue carries an
+unambiguous result without re-scanning comment keywords.
+
+Only comments newer than the current gate's waiting comment count are
+considered, so an old `approve` from a previous cycle cannot auto-advance a
+later gate.
+
+### Execution rule (no inner agents)
+
+`_run_multica_stage` replaces the claude/codex subprocess runner: it creates a
+sub-issue via the Multica CLI (`--parent <parent> --status todo --assignee
+<agent> --stage <ordinal>`), then polls until it reaches `done` or `in_review`
+(both count as stage success — Multica agents conventionally end a finished
+sub-issue in `in_review`, awaiting review; the parent-level gate is where human
+review happens), `blocked`/`cancelled` (failure → retry), or the stage timeout.
+The runner is decoupled from any particular CLI: the sub-issue assignee comes
+from the state's `multica_assignee` (any Multica agent name/UUID — or a squad
+name, which routes to the squad leader), falling back to
+`tracker.provider.assignee`. So each stage can dispatch to a different Multica
+agent (e.g. `multica_assignee: codex` vs `opencode` vs `claude-code`). The
+`runner: codex` field is just metadata; actual execution happens on the Multica
+side. `stokowski` itself never spawns codex/claude subprocesses.
+
+### Template
+
+`workflow.multica-half-auto.yaml` + `prompts_multica-half-auto/` is the gate
+version (investigate → research-review → implement → implementation-review →
+code-review → done), mirroring `linear-half-auto`. Dry-run with:
+
+```bash
+cp workflow.multica-half-auto.yaml workflow.yaml
+cp prompts_multica-half-auto/*.md prompts/
+stokowski workflow.yaml --dry-run
+```
+
+Unit tests (`tests/test_multica_tracker.py`) exercise the adapter against a
+fake `multica` CLI (`tests/fake_multica.py`): the six interface methods, the
+gate approve/rework decision, and rework counting.
+
 ## Configuration reference
 
 <details>
@@ -464,9 +568,13 @@ Open `http://localhost:4200` for the live dashboard.
 
 ```yaml
 tracker:
-  kind: linear                          # only "linear" supported
-  project_slug: "abc123def456"          # hex slugId from your Linear project URL
-  api_key: "lin_api_your_key_here"      # your Linear API key — agents inherit this
+  kind: multica                         # "multica" is the supported built-in adapter
+  project_slug: "your-project-id"       # Multica project UUID
+  provider:
+    project_id: "your-project-id"
+    workspace_id: "your-workspace-id"   # optional
+    assignee: "codex"                   # default agent/squad for stage sub-issues
+  # multica_bin: /path/to/multica       # optional override for MULTICA_BIN
 
 # These map Stokowski's internal lifecycle roles to your Linear state names.
 # You can rename values to match your team's Linear setup (e.g. todo: "Ready"),
@@ -483,24 +591,7 @@ linear_states:
     - Closed
 
 polling:
-  interval_ms: 15000                    # how often to poll Linear (default: 30000)
-
-workspace:
-  root: ~/code/stokowski-workspaces     # where per-issue directories are created
-
-hooks:
-  after_create: |                       # runs once when a new workspace is created
-    git clone --depth 1 git@github.com:org/repo.git .
-    npm install
-  before_run: |                         # runs before each agent turn
-    git pull origin main --rebase 2>/dev/null || true
-  after_run: |                          # runs after each agent turn (quality gate)
-    npm test 2>&1 | tail -20
-  before_remove: |                      # runs before workspace is deleted
-    echo "cleaning up"
-  on_stage_enter: |                     # runs when an issue enters a new stage
-    echo "entering stage"
-  timeout_ms: 120000                    # hook timeout in ms (default: 60000)
+  interval_ms: 15000                    # polling interval hint for the executing runner (default: 30000)
 
 claude:
   permission_mode: auto                 # "auto" = --dangerously-skip-permissions
@@ -535,7 +626,6 @@ states:                                # the state machine pipeline
     type: agent
     prompt: prompts/investigate.md     # Jinja2 template for this stage
     linear_state: active
-    runner: claude                     # "claude" (default) or "codex"
     model: claude-opus-4-6            # per-state model override
     max_turns: 8
     transitions:
@@ -553,7 +643,6 @@ states:                                # the state machine pipeline
     type: agent
     prompt: prompts/implement.md
     linear_state: active
-    runner: claude
     model: claude-sonnet-4-6
     max_turns: 30
     transitions:
@@ -571,7 +660,6 @@ states:                                # the state machine pipeline
     type: agent
     prompt: prompts/code-review.md
     linear_state: active
-    runner: codex                      # use Codex for an independent review
     session: fresh                     # fresh session — no prior context
     transitions:
       complete: review_merge
@@ -590,19 +678,18 @@ states:                                # the state machine pipeline
 
 ### State types
 
-| Type | Has prompt | What Stokowski does |
-|------|-----------|---------------------|
-| `agent` (default) | Yes | Dispatches a runner (Claude Code or Codex), runs turns, follows `transitions.complete` on success |
-| `gate` | No | Moves issue to review Linear state, waits for human. Follows `transitions.approve` on Gate Approved, `rework_to` on Rework |
-| `terminal` | No | Moves issue to terminal Linear state, deletes workspace |
+| Type | Has prompt | Semantics |
+|------|-----------|-----------|
+| `agent` (default) | Yes | Executing runner consumes the prompt and follows `transitions.complete` on success |
+| `gate` | No | Issue moves to review Linear state and waits for human. Follows `transitions.approve` on Gate Approved, `rework_to` on Rework |
+| `terminal` | No | Issue moves to terminal Linear state; active work stops |
 
-### Per-state runner config
+### Per-state config
 
-Each state can override these fields from the root `claude` / `hooks` defaults. Only fields you specify are overridden — everything else inherits.
+Each state can override these fields from the root `claude` defaults. Only fields you specify are overridden — everything else inherits.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `runner` | `claude` | `claude` (Claude Code CLI) or `codex` (Codex CLI) |
 | `model` | root `claude.model` | Model override for this state |
 | `max_turns` | root `claude.max_turns` | Max turns for this state |
 | `turn_timeout_ms` | root value | Per-turn timeout |
@@ -610,7 +697,6 @@ Each state can override these fields from the root `claude` / `hooks` defaults. 
 | `session` | `inherit` | `inherit` (resume prior session) or `fresh` (new session, no prior context) |
 | `permission_mode` | root value | Permission mode override |
 | `allowed_tools` | root value | Tool whitelist override |
-| `hooks` | root value | State-specific lifecycle hooks |
 
 </details>
 
@@ -749,7 +835,7 @@ This is formalised in OpenAI's [Harness Engineering](https://openai.com/index/ha
 ## Architecture
 
 ```
-workflow.yaml  →  ServiceConfig (states, linear_states, hooks, claude, etc.)
+workflow.yaml  →  ServiceConfig (states, linear_states, claude, etc.)
 prompts/       →  Jinja2 stage prompt files
           │
           ▼
@@ -759,27 +845,16 @@ prompts/       →  Jinja2 stage prompt files
     └── lifecycle       →  auto-injected issue context
           │
           ▼
-    Orchestrator  ──────────────────────▶  Linear GraphQL API
-    (asyncio loop, state machine)          fetch candidates
-          │                                reconcile state
-          │  dispatch (bounded concurrency)
-          ▼
-    Workspace Manager
-    ├── after_create hook  →  git clone, npm install, etc.
-    ├── before_run hook    →  git pull, typecheck, etc.
-    └── after_run hook     →  tests, lint, etc.
+    Orchestrator
+    ├── state machine (agent / gate / terminal)
+    ├── Multica tracker adapter (sub-issue lifecycle)
+    └── tracking comments for crash recovery
           │
           ▼
-    Agent Runner (per-state configurable)
-    ├── Claude Code: claude -p --output-format stream-json
-    │   └── --resume <session_id>  (multi-turn continuity)
-    ├── Codex: codex --quiet --prompt
-    ├── stall detection + turn timeout
-    └── PID tracking for clean shutdown
-          │
-          ▼
-    Agent (headless)
-    reads code · writes code · runs tests · opens PRs
+    Multica / Runner
+    consumes workflow.yaml + prompts
+    executes agent turns
+    manages workspaces and lifecycle
 ```
 
 | File | Purpose |
@@ -787,13 +862,10 @@ prompts/       →  Jinja2 stage prompt files
 | `stokowski/config.py` | `workflow.yaml` parser, typed config dataclasses, state machine validation |
 | `stokowski/prompt.py` | Three-layer prompt assembly (global + stage + lifecycle) |
 | `stokowski/tracking.py` | State machine tracking via structured Linear comments |
-| `stokowski/linear.py` | Linear GraphQL client (httpx async) |
+| `stokowski/multica_tracker.py` | Multica tracker adapter (sub-issue lifecycle) |
 | `stokowski/models.py` | Domain models: `Issue`, `RunAttempt`, `RetryEntry` |
-| `stokowski/orchestrator.py` | Poll loop, state machine dispatch, reconciliation, retry |
-| `stokowski/runner.py` | Multi-runner CLI integration (Claude Code + Codex), stream-json parser |
-| `stokowski/workspace.py` | Per-issue workspace lifecycle and hooks |
-| `stokowski/web.py` | Optional FastAPI dashboard |
-| `stokowski/main.py` | CLI entry point, keyboard handler |
+| `stokowski/orchestrator.py` | State machine dispatch, gate handling, retry scheduling |
+| `stokowski/main.py` | CLI entry point (`--dry-run`) |
 
 ---
 
@@ -813,11 +885,21 @@ git fetch --tags
 git checkout $(git describe --tags `git rev-list --tags --max-count=1`)
 
 # Re-install to pick up any new dependencies
-source .venv/bin/activate
-pip install -e ".[web]"
+uv sync --extra test
 
-# Verify everything still works
-stokowski --dry-run
+# Verify config parsing
+uv run python - <<'PY'
+from stokowski.config import parse_workflow_file, validate_config
+defn = parse_workflow_file("workflow.yaml")
+for e in validate_config(defn.config):
+    print("error:", e)
+PY
+
+# Run tests
+uv run pytest
+
+# Dry-run against Multica
+uv run python -m stokowski workflow.yaml --dry-run  # or use the consuming runner's dry-run mode
 ```
 
 > **Note:** `git pull origin main` will work but may include unreleased commits ahead of the latest tag — treat that as nightly if you go that route.
@@ -825,7 +907,7 @@ stokowski --dry-run
 **If you installed via pip** *(PyPI coming soon):*
 
 ```bash
-pip install --upgrade git+https://github.com/Sugar-Coffee/stokowski.git#egg=stokowski[web]
+pip install --upgrade git+https://github.com/Sugar-Coffee/stokowski.git#egg=stokowski[test]
 ```
 
 **After upgrading, check if `workflow.example.yaml` has changed** — new config fields may have been added that you'll want to adopt:
@@ -838,10 +920,10 @@ git diff HEAD@{1} workflow.example.yaml
 
 ## Security
 
-- **`permission_mode: auto`** passes `--dangerously-skip-permissions` to Claude Code. Agents can execute arbitrary commands in the workspace. Only use in trusted environments or Docker containers. (Codex runs with `--quiet` which auto-approves.)
+- **`permission_mode: auto`** passes `--dangerously-skip-permissions` to Claude Code. Agents can execute arbitrary commands. Only use in trusted environments or Docker containers.
 - **`permission_mode: allowedTools`** scopes Claude Code to a specific tool list — safer for production.
-- API keys live in `workflow.yaml`, which is gitignored. They are passed to agent subprocesses as env vars automatically.
-- Each agent only has access to its own isolated workspace directory.
+- API keys live in `workflow.yaml`, which is gitignored. They are exposed to the executing runner as env vars.
+- The executing runner is responsible for workspace isolation and sandboxing.
 
 ---
 
