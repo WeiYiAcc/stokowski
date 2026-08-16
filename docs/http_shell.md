@@ -12,6 +12,12 @@
   重建状态并推进一步；进程重启后从 issue 原样续跑。
 - **并发**：进程内共享一个 `Orchestrator`，`/tick` 与 `/advance` 用 asyncio 锁
   串行化（一次只推进一步，避免状态机竞争）。
+- **`/advance` 是同步阻塞的**：对 agent 状态会创建 Multica stage 子 issue 并
+  **等待其完成**后才 transition 并返回（最长 `turn_timeout_ms`，默认 1h）。
+  调用方按"驱动一步并等结果"的语义使用；gate 状态很快（进 gate / 处理响应）。
+- **`/tick` 是全局扫描**：把项目中处于 todo/active 状态的 issue 视为候选并
+  dispatch（创建 stage 子 issue）。在共享项目上使用前先确认候选集，避免
+  意外派发。
 
 ## 端点
 
@@ -48,7 +54,7 @@ Description=Stokowski stateless HTTP shell (Multica-driven state machine API)
 Type=simple
 Environment=HOME=%h STOKOWSKI_WORKFLOW=%h/ghq/github.com/WeiYiAcc/stokowski/workflow.yaml STOKOWSKI_HTTP_TOKEN=...
 WorkingDirectory=%h/ghq/github.com/WeiYiAcc/stokowski
-ExecStart=/bin/bash -lc 'exec %h/ghq/github.com/WeiYiAcc/stokowski/.venv/bin/uvicorn stokowski.http_shell:app --host 127.0.0.1 --port 8645'
+ExecStart=/bin/bash -lc 'exec %h/ghq/github.com/WeiYiAcc/stokowski/.venv/bin/uvicorn stokowski.http_shell:app --host 0.0.0.0 --port 8645'
 Restart=on-failure
 RestartSec=5
 
@@ -66,17 +72,16 @@ curl -s http://127.0.0.1:8645/health
 ## 调用约定（各机 agent 用 curl 驱动状态机）
 
 ```bash
-BASE=https://stokowski.wyrunning.dpdns.org   # 或 http://<vps-ip>:8645
-TOKEN=...                                    # STOKOWSKI_HTTP_TOKEN 未设置则省略
+BASE=http://104.168.22.124:8645      # VPS 公网 IP；tailnet 内可用 100.110.98.84
+TOKEN=<STOKOWSKI_HTTP_TOKEN>         # 未设置则省略 Authorization
 
 # 1) 健康检查
 curl -s $BASE/health
 
-# 2) 推进一个 issue 的状态机一步（gate 进 gate；agent 状态跑 stage 子 issue）
-curl -s -X POST $BASE/advance/<issue-uuid> \
-  -H "Authorization: Bearer $TOKEN"
+# 2) 推进一个 issue 的状态机一步（gate 进 gate；agent 状态跑 stage 子 issue 并阻塞等待）
+curl -s -X POST $BASE/advance/<issue-uuid> -H "Authorization: Bearer $TOKEN"
 
-# 3) 全局扫一遍（派发符合条件的新 issue）
+# 3) 全局扫一遍（派发符合条件的新 issue，注意候选集）
 curl -s -X POST $BASE/tick -H "Authorization: Bearer $TOKEN"
 ```
 
